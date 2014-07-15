@@ -11,6 +11,9 @@ monitor Git repositories.  Features:
   other channels.
 * Highly configurable.
 
+It was originally written by Mike Mueller at
+[https://github.com/mmueller/supybot-git](https://github.com/mmueller/supybot-git).
+
 NEWS
 ----
 
@@ -79,7 +82,7 @@ Let's break down the possible settings:
   plugin.  Two format specifiers are supported: %c (7-digit SHA) and %C (full
   40-digit SHA).  Default: nothing.
 
-* `commit message`: *Optional.* A format string describing how to display 
+* `commit message`: *Optional.* A format string describing how to display
   commits in the channel.  See Commit Messages below for detail.  Default:
   `[%s|%b|%a] %m`
 
