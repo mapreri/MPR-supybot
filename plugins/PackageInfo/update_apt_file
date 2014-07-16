@@ -2,7 +2,7 @@
 
 # Either set DIR to the same value as supybot.plugins.PackageInfo.aptdir,
 # or use the --dir command-line option.
-DIR=""
+DIR="$HOME/ircbot/data/aptdir"
 
 # Be quiet by default
 VERBOSE=0

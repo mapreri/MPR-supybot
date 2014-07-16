@@ -37,7 +37,7 @@ def description(pkg):
 class Apt:
     def __init__(self, plugin):
         self.aptdir = plugin.registryValue('aptdir')
-        self.distros = []
+        self.distros = ['wheezy', 'jessie', 'sid', 'trusty', 'utopic', 'devel']
         self.plugin = plugin
         self.log = plugin.log
         os.environ["LANG"] = "C"
