@@ -113,8 +113,7 @@ class Repository(object):
         self.branch = 'origin/' + options.get('branch', 'master')
         self.channels = options.get('channels', options.get('channel')).split()
         self.commit_link = options.get('commit link', '')
-        self.commit_message = options.get('commit message', '''%(15)%![%!%(09)%a%(15)%!|%!%(04)%s%(15)%!|%!%(13)%b%(15)%!|%!%(02)%c%(15)%!]%! %m
-    View%!:%! %(10)%l''')
+        self.commit_message = options.get('commit message', '%(15)%![%!%(09)%a%(15)%!|%!%(04)%s%(15)%!|%!%(13)%b%(15)%!|%!%(02)%c%(15)%!]%! %m')
         self.commit_reply = options.get('commit reply', '')
         self.errors = []
         self.last_commit = None
