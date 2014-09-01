@@ -4,6 +4,7 @@ tmp
 backup
 logs
 data/aptdir
+data/Later.db
 
 # the debomatic plugins need some nodejs modules, available only via
 # npm, don't track them.
