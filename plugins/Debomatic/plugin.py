@@ -24,7 +24,8 @@ class Debomatic(callbacks.Plugin):
                    'debomatic-i386', 'webui-i386',
                    'debomatic-armel', 'webui-armel',
                    'debomatic-armhf', 'webui-armhf',
-                   'debomatic-powerpc', 'webui-powerpc']
+                   'debomatic-powerpc', 'webui-powerpc',
+                   'debomatic-s390x', 'webui-s390x']
     path = '/home/mattia/ircbot/plugins/Debomatic/checkstatus.coffee'
 
     def __init__(self, irc):
