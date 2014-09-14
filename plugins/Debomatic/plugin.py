@@ -82,7 +82,7 @@ class Debomatic(callbacks.Plugin):
             if not down:
                 msg = "Everything is up and running."
             else:
-                msg = ", ".join([srt(x) for x in down]) + " are down."
+                msg = ", ".join([str(x) for x in down]) + " are down."
             irc.reply(msg)
         elif not [i for i in self.service_list if i == name]:
             msg = "There is no service named " + name + ". Available services include: " + avail + "."
