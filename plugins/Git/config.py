@@ -75,6 +75,14 @@ _GROUP_HDR_TXT = """A boolean setting. If true, the commits for
 _TIMEOUT_TXT = """Max time for fetch operations (seconds). A value of 0
 disables timeout for this repo completely"""
 
+commitMessage1 = \
+ "%(15)%![%!%(09)%a%(15)%!|%!%(04)%s%(15)%!|%!%(13)%b%(15)%!|%!%(02)%c%(15)%!]%! %m"
+
+commitMessage2 = ""
+
+snarfMessage1 = "I. e., [%n|%a] %m"
+
+snarfMessage2 = ""
 
 _REPO_OPTIONS = {
     'url':
@@ -84,13 +92,13 @@ _REPO_OPTIONS = {
     'branches':
         lambda: registry.String('*', _BRANCHES_TXT),
     'commitMessage1':
-        lambda: registry.String('[%n|%b|%a] %m', _MESSAGE1_TXT),
+        lambda: registry.String(commitMessage1, _MESSAGE1_TXT),
     'commitMessage2':
-        lambda: registry.String('', _MESSAGE2_TXT),
+        lambda: registry.String(commitMessage2, _MESSAGE2_TXT),
     'snarfMessage1':
-        lambda: registry.String('I. e., [%n|%a] %m', _SNARFMSG1_TXT),
+        lambda: registry.String(snarfMessage2, _SNARFMSG1_TXT),
     'snarfMessage2':
-        lambda: registry.String('', _SNARFMSG2_TXT),
+        lambda: registry.String(snarfMessage2, _SNARFMSG2_TXT),
     'enableSnarf':
         lambda: registry.Boolean(True, _SNARF_TXT),
     'groupHeader':
