@@ -6,6 +6,7 @@ logs
 data/aptdir
 data/Later.db
 data/Seen.db
+limnoria/data
 
 # the debomatic plugins need some nodejs modules, available only via
 # npm, don't track them.
