@@ -25,10 +25,10 @@ import supybot.schedule as schedule
 import supybot.log as supylog
 
 #import imaplib
-import re, os, time, commands
+import re, os, time, subprocess
 import xml.dom.minidom as minidom
-from htmlentitydefs import entitydefs as entities
-import email.FeedParser
+from html.entities import entitydefs as entities
+from email.parser import FeedParser
 import SOAPpy
 
 # All the words below will be censored when reporting bug information
@@ -52,7 +52,7 @@ def registerBugtracker(name, url='', description='', trackertype=''):
     if description:
         DESC.setValue(description)
     if trackertype:
-        if defined_bugtrackers.has_key(trackertype.lower()):
+        if trackertype.lower() in defined_bugtrackers:
             TRACKERTYPE.setValue(trackertype.lower())
         else:
             raise BugtrackerError("Unknown trackertype: %s" % trackertype)
@@ -64,7 +64,7 @@ def _getnodetxt(node):
         if childnode.nodeType == childnode.TEXT_NODE:
             L.append(childnode.data)
     if not L:
-        raise ValueError, "No text nodes"
+        raise ValueError("No text nodes")
     val = ''.join(L)
     if node.hasAttribute('encoding'):
         encoding = node.getAttribute('encoding')
@@ -103,11 +103,11 @@ class Bugtracker(callbacks.PluginRegexp):
         for name in self.registryValue('bugtrackers'):
             registerBugtracker(name)
             group = self.registryValue('bugtrackers.%s' % name.replace('.','\\.'), value=False)
-            if group.trackertype() in defined_bugtrackers.keys():
+            if group.trackertype() in list(defined_bugtrackers.keys()):
                 self.db[name] = defined_bugtrackers[group.trackertype()](name, group.url(), group.description())
             else:
                 self.log.warning("Bugtracker: Unknown trackertype: %s (%s)" % (group.trackertype(), name))
-        self.shorthand = utils.abbrev(self.db.keys())
+        self.shorthand = utils.abbrev(list(self.db.keys()))
         self.shown = {}
 
 #        # Schedule bug reporting
@@ -134,7 +134,7 @@ class Bugtracker(callbacks.PluginRegexp):
     def is_ok(self, channel, tracker, bug):
         '''Flood/repeat protection'''
         now = time.time()
-        for k in self.shown.keys():
+        for k in list(self.shown.keys()):
             if self.shown[k] < now - self.registryValue('repeatdelay', channel):
                 self.shown.pop(k)
         if (channel, tracker, bug) not in self.shown:
@@ -171,7 +171,7 @@ class Bugtracker(callbacks.PluginRegexp):
 #        # Read all new mail
 #        for m in new_mail:
 #            msg = sc.fetch(m, 'RFC822')[1][0][1]
-#            fp = email.FeedParser.FeedParser()
+#            fp = FeedParser()
 #            sc.store(m, '+FLAGS', "(\Deleted)") # Mark message deleted so we don't have to process it again
 #            fp.feed(msg)
 #            bug = fp.close()
@@ -258,7 +258,7 @@ class Bugtracker(callbacks.PluginRegexp):
             irc.error("Bugtrackers of type '%s' are not understood" % trackertype)
             return
         registerBugtracker(name, url, description, trackertype)
-        self.shorthand = utils.abbrev(self.db.keys())
+        self.shorthand = utils.abbrev(list(self.db.keys()))
         irc.replySuccess()
     add = wrap(add, [('checkCapability', 'admin'), 'something', 'something', 'url', additional('text')])
 
@@ -272,7 +272,7 @@ class Bugtracker(callbacks.PluginRegexp):
             name = self.shorthand[name.lower()]
             del self.db[name]
             self.registryValue('bugtrackers').remove(name)
-            self.shorthand = utils.abbrev(self.db.keys())
+            self.shorthand = utils.abbrev(list(self.db.keys()))
             irc.replySuccess()
         except KeyError:
             s = self.registryValue('replyNoBugtracker', ircutils.isChannel(msg.args[0]) and msg.args[0] or None)
@@ -294,7 +294,7 @@ class Bugtracker(callbacks.PluginRegexp):
             registerBugtracker(newname, group.url(), d, group.trackertype())
             del self.db[name]
             self.registryValue('bugtrackers').remove(name)
-            self.shorthand = utils.abbrev(self.db.keys())
+            self.shorthand = utils.abbrev(list(self.db.keys()))
             irc.replySuccess()
         except KeyError:
             s = self.registryValue('replyNoBugtracker', ircutils.isChannel(msg.args[0]) and msg.args[0] or None)
@@ -319,7 +319,7 @@ class Bugtracker(callbacks.PluginRegexp):
                 irc.error(s % name)
         else:
             if self.db:
-                L = self.db.keys()
+                L = list(self.db.keys())
                 L.sort()
                 irc.reply(utils.str.commaAndify(L))
             else:
@@ -355,7 +355,7 @@ class Bugtracker(callbacks.PluginRegexp):
         # filter out bug number that are 4 numbers, start with '1' and end in '04' or '10
         # (let's fix this for 2020 ;)
         if match.group('bt').lower() == 'ubuntu':
-            bugids = filter(lambda bugnum: not (len(bugnum) == 4 and bugnum[0] == '1' and bugnum[2:] in ('04', '10')), bugids)
+            bugids = [bugnum for bugnum in bugids if not (len(bugnum) == 4 and bugnum[0] == '1' and bugnum[2:] in ('04', '10'))]
         # End HACK
 
         if not sure_bug:
@@ -364,7 +364,7 @@ class Bugtracker(callbacks.PluginRegexp):
         bugids = list(set(bugids)) ## remove dups
 
         msg.tag('nbugs', nbugs + len(bugids))
-        bt = map(lambda x: x.lower(), match.group('bt').split())
+        bt = [x.lower() for x in match.group('bt').split()]
         # Strip off trailing ':' from the tracker name. Allows for (LP: #nnnnnn)
         if bt and bt[0].endswith(':'):
             bt[0] = bt[:-1]
@@ -407,7 +407,7 @@ class Bugtracker(callbacks.PluginRegexp):
                 except BugNotFoundError:
                     if self.registryValue('replyWhenNotFound'):
                         irc.error("%s bug %d could not be found" % (tracker.description, bugid))
-                except BugtrackerError, e:
+                except BugtrackerError as e:
 #                    if 'private' in str(e):
 #                        irc.reply("Bug %d on http://launchpad.net/bugs/%d is private" % (bugid, bugid))
 #                        return
@@ -433,9 +433,9 @@ class Bugtracker(callbacks.PluginRegexp):
             if not tracker:
                 return
             report = self.get_bug(channel, tracker, int(match.group('bug')), self.registryValue('showassignee', channel), do_url = False)
-        except BugtrackerError, e:
+        except BugtrackerError as e:
             irc.error(str(e))
-        except BugNotFoundError, e:
+        except BugNotFoundError as e:
             irc.error("%s bug %s not found" % (tracker, match.group('bug')))
         else:
             for r in report:
@@ -500,7 +500,7 @@ class Bugtracker(callbacks.PluginRegexp):
         if 'sourceforge.net' in snarfurl: # See below
             return None
 
-        for t in self.db.keys():
+        for t in list(self.db.keys()):
             tracker = self.db.get(t, None)
             if not tracker:
                 self.log.error("No tracker for key %r" % t)
@@ -525,7 +525,7 @@ class Bugtracker(callbacks.PluginRegexp):
             tracker = Bugzilla().get_tracker(snarfurl)
             if tracker:
                 self.db[tracker.name] = tracker
-                self.shorthand = utils.abbrev(self.db.keys())
+                self.shorthand = utils.abbrev(list(self.db.keys()))
                 return tracker
         return None
 
@@ -613,16 +613,16 @@ class Bugzilla(IBugtracker):
         try:
             bugxml = utils.web.getUrl(url)
             zilladom = minidom.parseString(bugxml)
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse XML returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         bug_n = zilladom.getElementsByTagName('bug')[0]
         if bug_n.hasAttribute('error'):
             errtxt = bug_n.getAttribute('error')
             if errtxt == 'NotFound':
                 raise BugNotFoundError
             s = 'Error getting %s bug #%s: %s' % (self.description, id, errtxt)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         try:
             title = _getnodetxt(bug_n.getElementsByTagName('short_desc')[0])
             status = _getnodetxt(bug_n.getElementsByTagName('bug_status')[0])
@@ -637,9 +637,9 @@ class Bugzilla(IBugtracker):
                 assignee = _getnodetxt(bug_n.getElementsByTagName('assigned_to')[0])
             except:
                 pass
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse XML returned by %s bugzilla: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         return [(id, component, title, severity, status, assignee, "%s/show_bug.cgi?id=%d" % (self.url, id))]
 
 class Issuezilla(Bugzilla):
@@ -705,7 +705,7 @@ class Launchpad(IBugtracker):
             supylog.exception("Unknown exception while accessing the Launchpad API")
 
     def _parse(self, task): #Depricated
-        parser = email.FeedParser.FeedParser()
+        parser = FeedParser()
         parser.feed(task)
         return parser.close()
 
@@ -769,7 +769,7 @@ class Launchpad(IBugtracker):
         try:
             bugdata = self.lp.bugs[id]
             if bugdata.private:
-                raise BugtrackerError, "This bug is private"
+                raise BugtrackerError("This bug is private")
             dup = bugdata.duplicate_of
             summary_prefix = '' # Used to made dups easier
             while dup:
@@ -787,7 +787,7 @@ class Launchpad(IBugtracker):
                     tasks.sort(self._sort)
                     taskdata = tasks[-1]
                 except ValueError:
-                    tasks = [_ for _ in tasks if _.bug_target_name.endswith(u'(Ubuntu)')]
+                    tasks = [_ for _ in tasks if _.bug_target_name.endswith('(Ubuntu)')]
                     if tasks:
                         if len(tasks) != 1:
                             try:
@@ -806,24 +806,24 @@ class Launchpad(IBugtracker):
             t = taskdata.bug_target_display_name #task name
 
             if assignee: # "Diaplay Name (Launchpad ID)"
-                assignee = u"%s (%s)" % (assignee.display_name, assignee.name)
+                assignee = "%s (%s)" % (assignee.display_name, assignee.name)
             else:
                 assignee = ''
 
-        except Exception, e:
+        except Exception as e:
             if type(e).__name__ == 'HTTPError': # messy, but saves trying to import lazr.restfulclient.errors.HTPError
                 if e.response.status == 404:
                     bugNo = e.content.split(None)[-1][2:-1] # extract the real bug number
                     if bugNo != str(id): # A duplicate of a private bug, at least we know it exists
-                        raise BugtrackerError, 'Bug #%s is a duplicate of bug #%s, but it is private (%s/bugs/%s)' % (id, bugNo, self.url, bugNo)
-                    raise BugtrackerError, "Bug #%s (%s/bugs/%d) is private or doesn't exist" % (id, self.url, id) # Could be private, could just not exist
+                        raise BugtrackerError('Bug #%s is a duplicate of bug #%s, but it is private (%s/bugs/%s)' % (id, bugNo, self.url, bugNo))
+                    raise BugtrackerError("Bug #%s (%s/bugs/%d) is private or doesn't exist" % (id, self.url, id)) # Could be private, could just not exist
 
                 supylog.exception("Error gathering bug data for %s bug #%d" % (self.description, id))
-                raise BugtrackerError, "Could not gather data from %s for bug #%s (%s/bugs/%s). The error has been logged" % (self.description, id, self.url, id)
+                raise BugtrackerError("Could not gather data from %s for bug #%s (%s/bugs/%s). The error has been logged" % (self.description, id, self.url, id))
             elif isinstance(e, KeyError):
                 raise BugNotFoundError
             supylog.exception("Error gathering bug data for %s bug %d" % (self.description, id))
-            raise BugtrackerError, "Could not gather data from %s for bug #%s (%s/bugs/%s). The error has been logged" % (self.description, id, self.url, id)
+            raise BugtrackerError("Could not gather data from %s for bug #%s (%s/bugs/%s). The error has been logged" % (self.description, id, self.url, id))
 
         extinfo = "(affected: %d, heat: %d)" % (affected, heat)
 
@@ -832,34 +832,34 @@ class Launchpad(IBugtracker):
 
     def get_bug_old(self, id): #Depricated
         if id == 1:
-            raise BugtrackerError, "https://bugs.launchpad.net/ubuntu/+bug/1 (Not reporting large bug)"
+            raise BugtrackerError("https://bugs.launchpad.net/ubuntu/+bug/1 (Not reporting large bug)")
 
         try:
             bugdata = utils.web.getUrl("%s/bugs/%d/+text" % (self.url,id))
-        except Exception, e:
+        except Exception as e:
             if '404' in str(e):
                 raise BugNotFoundError
             s = 'Could not parse data returned by %s: %s (%s/bugs/%d)' % (self.description, e, self.url, id)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         summary = {}
         # Trap private bugs
         if "<!-- 4a. didn't try to log in last time: -->" in bugdata:
-            raise BugtrackerError, "This bug is private"
+            raise BugtrackerError("This bug is private")
         try:
             # Split bug data into separate pieces (bug data, task data)
             data     =  bugdata.split('\n\n')
             bugdata  = data[0]
             taskdata = data[1:]
-            parser   = email.FeedParser.FeedParser()
+            parser   = FeedParser()
             parser.feed(bugdata)
             bugdata = parser.close()
-            taskdata = map(self._parse, taskdata)
+            taskdata = list(map(self._parse, taskdata))
             taskdata.sort(self._old_sort)
             taskdata = taskdata[-1]
                 
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s: %s (%s/bugs/%d)' % (self.description, e, self.url, id)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         # Try and find duplicates
         t = taskdata['task']
         if '(' in t:
@@ -868,9 +868,9 @@ class Launchpad(IBugtracker):
             bugNo = bugdata['duplicate-of']
             try:
                 data = self.get_bug(int(bugdata['duplicate-of']))
-            except Exception, e:
+            except Exception as e:
                 if '404' in str(e):
-                    raise BugtrackerError, 'Bug #%s is a duplicate of Bug #%s, but it is private. (%s/bugs/%s)' % (id, bugNo, self.url, bugNo)
+                    raise BugtrackerError('Bug #%s is a duplicate of Bug #%s, but it is private. (%s/bugs/%s)' % (id, bugNo, self.url, bugNo))
             data = list(data[0])
             data[2] = ('duplicate for #%d ' % id) + data[2]
             return [tuple(data)]
@@ -897,9 +897,9 @@ class Debbugs(IBugtracker):
         bug_url = "http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=%d" % id
         try:
             raw = self.soap_proxy.get_status(id)
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s: %s' % (self.description, e)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         if not raw:
             raise BugNotFoundError
         raw = raw['item']['value']
@@ -909,9 +909,9 @@ class Debbugs(IBugtracker):
             else:
                 status = 'Open'
             return [(id, raw['package'], raw['subject'], raw['severity'], status, '', "%s/%s" % (self.url, id))]
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s bugtracker: %s (%s)' % (self.description, e, bug_url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
 
 class Mantis(IBugtracker):
     def __init__(self, *args, **kwargs):
@@ -923,16 +923,16 @@ class Mantis(IBugtracker):
         url = self.url + "/view.php?id=%i" % id
         try:
             raw = self.soap_proxy.mc_issue_get('', "", id)
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         if not raw:
             raise BugNotFoundError
         try:
             return [(id, raw['project']['name'], raw['summary'], raw['priority']['name'], raw['resolution']['name'], '', url)]
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s bugtracker: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
 
 # For trac based trackers we get the tab-separated-values format.
 # The other option is a comma-separated-values format, but if the description
@@ -943,11 +943,11 @@ class Trac(IBugtracker):
         bug_url = "%s/%d" % (self.url, id)
         try:
             raw = utils.web.getUrl("%s?format=tab" % bug_url)
-        except Exception, e:
+        except Exception as e:
             if 'HTTP Error 500' in str(e):
                 raise BugNotFoundError
             s = 'Could not parse data returned by %s: %s' % (self.description, e, bug_url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         raw = raw.replace("\r\n", '\n')
         (headers, rest) = raw.split('\n', 1)
         headers = headers.strip().split('\t')
@@ -978,11 +978,11 @@ class WikiForms(IBugtracker):
         url = "%s/%05d" % (self.url, id)
         try:
             bugdata = utils.web.getUrl(url)
-        except Exception, e:
+        except Exception as e:
             if 'HTTP Error 404' in str(e):
                 raise BugNotFoundError
             s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         for l in bugdata.split("\n"):
             l2 = l.lower()
             if '<dt>importance</dt>' in l2:
@@ -1004,9 +1004,9 @@ class Str(IBugtracker):
         url = "%s?L%d" % (self.url, id)
         try:
             bugdata = utils.web.getUrl(url)
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         for l in bugdata.split("\n"):
             l2 = l.lower()
             if 'nowrap>priority:</th>' in l2:
@@ -1044,9 +1044,9 @@ class Sourceforge(IBugtracker):
         url = self._sf_url % id
         try:
             bugdata = utils.web.getUrl(url)
-        except Exception, e:
+        except Exception as e:
             s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError, s
+            raise BugtrackerError(s)
         try:
             reo = sfre.search(bugdata)
             status = reo.group('status')
@@ -1060,7 +1060,7 @@ class Sourceforge(IBugtracker):
 # Introspection is quite cool
 defined_bugtrackers = {}
 v = vars()
-for k in v.keys():
+for k in list(v.keys()):
     if type(v[k]) == type(IBugtracker) and issubclass(v[k], IBugtracker) and not (v[k] == IBugtracker):
         defined_bugtrackers[k.lower()] = v[k]
 

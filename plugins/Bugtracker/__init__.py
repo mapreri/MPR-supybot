@@ -21,6 +21,8 @@ This plugin will display bug information when requested.
 import supybot
 import supybot.world as world
 
+from imp import reload
+
 __version__ = "2.5.1"
 __author__ = supybot.Author("Terence Simpson", "tsimpson", "tsimpson@ubuntu.com")
 __contributors__ = {
@@ -28,12 +30,12 @@ __contributors__ = {
 }
 __url__ = 'https://launchpad.net/ubuntu-bots/'
 
-import config
+from . import config
 reload(config)
-import plugin
+from . import plugin
 reload(plugin)
 
 if world.testing:
-    import test
+    from . import test
 Class = plugin.Class
 configure = config.configure
