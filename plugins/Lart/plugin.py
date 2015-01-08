@@ -94,7 +94,7 @@ class Lart(plugins.ChannelIdDatabasePlugin):
         if not self.registryValue('enabled', msg.args[0]):
             return
         if ' for ' in text:
-            (target, reason) = map(str.strip, text.split(' for ', 1))
+            (target, reason) = list(map(str.strip, text.split(' for ', 1)))
         else:
             (target, reason) = (text, '')
 
