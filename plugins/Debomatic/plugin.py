@@ -60,7 +60,7 @@ class Debomatic(callbacks.Plugin):
         for row in out:
             L.append(row)
         for row in L:
-            item = dict(zip(keys, row.split()))
+            item = dict(list(zip(keys, row.split())))
             status.append(item)
         for i in status:
             service = i['service']+'-'+i['arch']
