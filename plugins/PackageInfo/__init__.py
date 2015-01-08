@@ -20,6 +20,8 @@ Display information on packages using apt-cache and search for files in packages
 import supybot
 import supybot.world as world
 
+from imp import reload
+
 __version__ = "0.9.1"
 __author__ = supybot.Author("Terence Simpson", "tsimpson", "tsimpson@ubuntu.com")
 __contributors__ = {
@@ -27,17 +29,17 @@ __contributors__ = {
 }
 __url__ = 'https://launchpad.net/ubuntu-bots/'
 
-import config
+from . import config
 reload(config)
-import plugin
+from . import plugin
 reload(plugin) # In case we're being reloaded.
-import packages
+from . import packages
 reload(packages)
 # Add more reloads here if you add third-party modules and want them to be
 # reloaded when this plugin is reloaded.  Don't forget to import them as well!
 
 if world.testing:
-    import test
+    from . import test
 
 Class = plugin.Class
 configure = config.configure
