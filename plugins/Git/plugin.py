@@ -65,7 +65,7 @@ from supybot.commands import time
 from supybot.commands import wrap
 from supybot.utils.str import nItems
 
-import config
+from . import config
 
 try:
     import git
@@ -112,7 +112,7 @@ def _format_message(ctx, commit, branch='unknown'):
         outline = ''
         for c in line:
             if mode == MODE_SUBST:
-                if c in subst.keys():
+                if c in list(subst.keys()):
                     outline += subst[c]
                     mode = MODE_NORMAL
                 elif c == '(':
@@ -238,7 +238,7 @@ class _Repository(object):
             self._clone()
             self.init()
 
-    branches = property(lambda self: self.commit_by_branch.keys())
+    branches = property(lambda self: list(self.commit_by_branch.keys()))
 
     @staticmethod
     def create(reponame, cloning_done_cb = lambda x: True, opts = None):
@@ -248,7 +248,7 @@ class _Repository(object):
         opts need to contain at least url and channels.
         '''
         if opts:
-            for key, value in opts.iteritems():
+            for key, value in list(opts.items()):
                 config.repo_option(reponame, key).setValue(value)
         r = _Repository(reponame)
         try:
@@ -431,7 +431,7 @@ class _DisplayCtx(object):
     def _get_limited_commits(self, commits_by_branch):
         "Return the topmost commits which are OK to display."
         top_commits = []
-        for commits in commits_by_branch.values():
+        for commits in list(commits_by_branch.values()):
             top_commits.extend(commits)
         top_commits = sorted(top_commits, key = lambda c: c.committed_date)
         commits_at_once = config.global_option('maxCommitsAtOnce').value
@@ -459,7 +459,7 @@ class _DisplayCtx(object):
         if not commits_by_branch:
             return
         top_commits = self._get_limited_commits(commits_by_branch)
-        for branch, all_commits in commits_by_branch.iteritems():
+        for branch, all_commits in list(commits_by_branch.items()):
             for a in set([c.author.name for c in all_commits]):
                 commits = [c for c in all_commits
                                if c.author.name == a and c in top_commits]
@@ -532,7 +532,7 @@ class _Scheduler(object):
             try:
                 self.fetcher.stop()
                 self.fetcher.join()    # This might take time, but it's safest.
-            except Exception, e:
+            except Exception as e:
                 self.log.error('Stopping fetcher: %s' % str(e),
                                exc_info=True)
         self.reset(die = True)
@@ -577,7 +577,7 @@ class Git(callbacks.PluginRegexp):
 
     def _parse_repo(self, irc, msg, repo, channel):
         """ Parse first parameter as a repo, return repository or None. """
-        matches = filter(lambda r: r.name == repo, self.repos.get())
+        matches = [r for r in self.repos.get() if r.name == repo]
         if not matches:
             irc.reply('No repository named %s, showing available:'
                       % repo)
@@ -649,8 +649,7 @@ class Git(callbacks.PluginRegexp):
 
         Display the names of known repositories configured for this channel.
         """
-        repositories = filter(lambda r: channel in r.options.channels,
-                              self.repos.get())
+        repositories = [r for r in self.repos.get() if channel in r.options.channels]
         if not repositories:
             irc.reply('No repositories configured for this channel.')
             return
