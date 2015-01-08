@@ -265,7 +265,7 @@ class _Repository(object):
             os.makedirs(self.options.repo_dir)
         if os.path.exists(self.path):
             shutil.rmtree(self.path)
-        git.Git('.').clone(self.options.url, self.path, no_checkout=True)
+        git.Git('.').clone(self.options.url, self.path, no_checkout=False)
 
     def init(self):
         ''' Lazy init invoked when a clone exists, reads repo data. '''
