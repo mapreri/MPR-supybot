@@ -76,7 +76,7 @@ _TIMEOUT_TXT = """Max time for fetch operations (seconds). A value of 0
 disables timeout for this repo completely"""
 
 commitMessage1 = \
- "%(15)%![%!%(09)%a%(15)%!|%!%(04)%m%(15)%!|%!%(13)%b%(15)%!|%!%(02)%c%(15)%!]%! %m"
+ "%(15)%![%!%(09)%a%(15)%!|%!%(04)%n%(15)%!|%!%(13)%b%(15)%!|%!%(02)%c%(15)%!]%! %m"
 
 commitMessage2 = ""
 
