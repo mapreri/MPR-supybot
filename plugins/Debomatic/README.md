@@ -12,3 +12,9 @@ Requirements
 ============
 
 The `socket.io-client` node modules is required.
+On Debian 8 (Jessie) onward:
+
+```
+sudo apt-get install --no-install-recommends npm nodejs-legacy
+npm install socked.io-client
+```
