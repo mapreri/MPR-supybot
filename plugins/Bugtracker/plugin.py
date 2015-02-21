@@ -25,11 +25,12 @@ import supybot.schedule as schedule
 import supybot.log as supylog
 
 #import imaplib
-import re, os, time, subprocess
+import re, os, sys, time, subprocess
 import xml.dom.minidom as minidom
 from html.entities import entitydefs as entities
 from email.parser import FeedParser
-import SOAPpy
+if sys.version_info < (3,0):
+    import SOAPpy
 
 # All the words below will be censored when reporting bug information
 bad_words = set(["fuck","fuk","fucking","fuking","fukin","fuckin","fucked","fuked","fucker","shit","cunt","bastard","nazi","nigger","nigga","cock","bitches","bitch"])
@@ -889,6 +890,9 @@ class Launchpad(IBugtracker):
 # </rant>
 class Debbugs(IBugtracker):
     def __init__(self, *args, **kwargs):
+        if not sys.version_info < (3,0):
+            # XXX python3 does not have SOAPpy, so just quit here (for now)
+            return
         IBugtracker.__init__(self, *args, **kwargs)
         self.soap_proxy = SOAPpy.SOAPProxy("bugs.debian.org/cgi-bin/soap.cgi", "Debbugs/SOAP/Status")
         self.soap_proxy.soapaction = "Debbugs/SOAP/Status#get_status"
@@ -915,6 +919,10 @@ class Debbugs(IBugtracker):
 
 class Mantis(IBugtracker):
     def __init__(self, *args, **kwargs):
+        if not sys.version_info < (3,0):
+            # XXX python3 does not have SOAPpy, so just quit here (for now)
+            return
+        IBugtracker.__init__(self, *args, **kwargs)
         IBugtracker.__init__(self, *args, **kwargs)
         self.soap_proxy = SOAPpy.SOAPProxy(self.url + "/api/soap/mantisconnect.php", "http://futureware.biz/mantisconnect")
         self.soap_proxy.soapaction = "http://futureware.biz/mantisconnect#mc_issue_get"
