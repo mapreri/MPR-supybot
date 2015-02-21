@@ -314,9 +314,6 @@ class _Repository(object):
         new_commits_by_branch = {}
         for branch in self.commit_by_branch:
             rev = "%s..%s" % (self.commit_by_branch[branch], branch)
-            # Workaround for GitPython bug:
-            # https://github.com/gitpython-developers/GitPython/issues/61
-            self.repo.odb.update_cache()
             results = list(self.repo.iter_commits(rev))
             new_commits_by_branch[branch] = results
             self.log.debug("Poll: branch: %s last commit: %s, %d commits" %
