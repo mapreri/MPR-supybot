@@ -4,15 +4,9 @@ tmp
 backup
 logs
 limnoria/data
-data/aptdir
 
-# Later
-data/Later.db
-# Seen
-data/Seen.db
-data/Seen.any.db
-# RSS
-data/RSS_announced.flat
+# all plugins data
+data/*
 
 # the debomatic plugins need some nodejs modules, available only via
 # npm, don't track them.
