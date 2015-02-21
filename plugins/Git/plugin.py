@@ -745,7 +745,7 @@ class Git(callbacks.PluginRegexp):
             ''' Callback invoked after cloning is done. '''
             if isinstance(result, _Repository):
                 self.repos.append(result)
-                irc.reply("Repository created and cloned")
+                irc.reply("Repository " + reponame + " created and cloned")
             else:
                 self.log.info("Cannot clone: " + str(result))
                 irc.reply("Error: Cannot clone repo: " + str(result))
@@ -756,7 +756,7 @@ class Git(callbacks.PluginRegexp):
         opts = {'url': url, 'channels': channels}
         if world.testing:
             _Repository.create(reponame, cloning_done_cb, opts)
-            irc.reply("Repository created and cloned")
+            irc.reply("Repository " + reponame + " created and cloned")
             return
         t = threading.Thread(target = _Repository.create,
                              args = (reponame, cloning_done_cb, opts))
