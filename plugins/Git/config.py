@@ -156,12 +156,12 @@ conf.registerGlobalValue(Git, 'repolist',
            "Internal list of configured repos, please don't touch "))
 
 conf.registerGlobalValue(Git, 'repoDir',
-    registry.String('git_repositories', """The path where local copies of
+    registry.String('data/git/repositories', """The path where local copies of
     repositories will be kept. Relative paths are interpreted from
     supybot's startup directory."""))
 
 conf.registerGlobalValue(Git, 'pollPeriod',
-    registry.NonNegativeInteger(120, """ How often (in seconds) that
+    registry.NonNegativeInteger(60, """ How often (in seconds) that
   repositories will be polled for changes. Zero disables periodic polling.
   If you change the value from zero to a positive value, call `rehash` to
   restart polling."""))
