@@ -60,11 +60,12 @@ class Debomatic(callbacks.Plugin):
         for row in out:
             L.append(row)
         for row in L:
-            item = dict(list(zip(keys, row.split())))
+            item = dict(zip(keys, row.split()))
             status.append(item)
         for i in status:
-            service = i['service']+'-'+i['arch']
-            statuses[service] = i['status']
+            service = i['service'].decode('ascii') + '-' + \
+                      i['arch'].decode('ascii')
+            statuses[service] = i['status'].decode('ascii')
         return statuses
 
     def status(self, irc, msg, args, channel, name=None):
@@ -90,7 +91,7 @@ class Debomatic(callbacks.Plugin):
         else:
             status = self._do()
             if not status[name] == "running":
-                if status[name] is None:
+                if not status[name]:
                     msg = name + " is down! Come on! (No error message available)"
                 else:
                     msg = name + " is down! Come on! Error message: " + status[name]
