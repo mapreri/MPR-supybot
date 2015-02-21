@@ -180,6 +180,8 @@ def _poll_all_repos(repolist, throw = False):
         if not targets:
             _log.info("Skipping %s: not in configured channel(s)." %
                           repository.name)
+            _log.debug("irc.state.channels: " + str(irc.state.channels))
+            _log.debug("repository.options.channels: " + str(repository.options.channels))
             continue
         try:
             poll_repository(repository, targets)
