@@ -7,6 +7,7 @@
 
 from supybot.test import *
 
+
 class DebomaticTestCase(PluginTestCase):
     plugins = ('Debomatic',)
 

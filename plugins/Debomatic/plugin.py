@@ -20,18 +20,18 @@ class Debomatic(callbacks.Plugin):
     service. Anyway it watches the known Debomatic istances and notify you if
     something is wrong."""
     threaded = True
-    service_list= ['debomatic-amd64', 'webui-amd64',
-                   'debomatic-i386', 'webui-i386',
-                   'debomatic-armel', 'webui-armel',
-                   'debomatic-armhf', 'webui-armhf',
-                   'debomatic-powerpc', 'webui-powerpc',
-                   'debomatic-s390x', 'webui-s390x']
+    service_list = ['debomatic-amd64', 'webui-amd64',
+                    'debomatic-i386', 'webui-i386',
+                    'debomatic-armel', 'webui-armel',
+                    'debomatic-armhf', 'webui-armhf',
+                    'debomatic-powerpc', 'webui-powerpc',
+                    'debomatic-s390x', 'webui-s390x']
     path = '/home/mattia/ircbot/plugins/Debomatic/checkstatus.coffee'
 
     def __init__(self, irc):
         self.__parent = super(Debomatic, self)
         self.__parent.__init__(irc)
-        launch = threading.Thread(target=self._launcher, args=(irc, '#mapreri'))
+        launch = threading.Thread(target=self._launcher, args=(irc))
         launch.start()
 
     def _launcher(self, irc, channel):
@@ -40,8 +40,9 @@ class Debomatic(callbacks.Plugin):
             status = self._do()
             for i in self.service_list:
                 if not status[i] == "running":
-                    if not i in down:
-                        line = "WARNING!!! " + i + " is just went down! Error messge: " + status[i]
+                    if i not in down:
+                        line = "WARNING!!! " + i + " is just went down! " + \
+                               "Error messge: " + status[i]
                         msg = irc.privmsg(channel, line)
                         irc.queueMsg(msg)
                         down.append(i)
@@ -86,15 +87,17 @@ class Debomatic(callbacks.Plugin):
                 msg = ", ".join([str(x) for x in down]) + " are down."
             irc.reply(msg)
         elif not [i for i in self.service_list if i == name]:
-            msg = "There is no service named " + name + ". Available services include: " + avail + "."
+            msg = "There is no service named " + name + \
+                  ". Available services include: " + avail + "."
             irc.reply(msg)
         else:
             status = self._do()
             if not status[name] == "running":
                 if not status[name]:
-                    msg = name + " is down! Come on! (No error message available)"
+                    msg = name + " is down! Come on! (No error message)"
                 else:
-                    msg = name + " is down! Come on! Error message: " + status[name]
+                    msg = name + " is down! Come on! Error message: " + \
+                          status[name]
             else:
                 msg = name + " is up and running!"
             irc.reply(msg)

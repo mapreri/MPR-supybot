@@ -26,11 +26,11 @@ __author__ = supybot.Author('Mattia Rizzolo', 'mapreri', 'mattia@mapreri.org')
 __contributors__ = {}
 
 # This is a url where the most recent plugin package can be downloaded.
-__url__ = '' # 'http://supybot.com/Members/yourname/Debomatic/download'
+__url__ = ''  # 'http://supybot.com/Members/yourname/Debomatic/download'
 
 from . import config
 from . import plugin
-reload(plugin) # In case we're being reloaded.
+reload(plugin)  # In case we're being reloaded.
 # Add more reloads here if you add third-party modules and want them to be
 # reloaded when this plugin is reloaded.  Don't forget to import them as well!
 
