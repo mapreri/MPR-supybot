@@ -425,7 +425,7 @@ class _DisplayCtx(object):
         for commit in commits:
             lines = _format_message(self, commit, branch)
             for line in lines:
-                msg = ircmsgs.privmsg(self.channel, line)
+                msg = ircmsgs.privmsg(self.channel, line.decode('utf8'))
                 self.irc.queueMsg(msg)
 
     def _get_limited_commits(self, commits_by_branch):
