@@ -33,6 +33,6 @@ check = (host) ->
 services = process.argv[2..]
 
 if not services.length
-    services = ['amd64', 'i386', 'powerpc', 'armel', 'armhf', 's390x']
+    services = ['arm64', 'amd64', 'i386', 'powerpc', 'armel', 'armhf', 's390x']
 
 check host for host in services

@@ -20,7 +20,8 @@ class Debomatic(callbacks.Plugin):
     service. Anyway it watches the known Debomatic istances and notify you if
     something is wrong."""
     threaded = True
-    service_list = ['debomatic-amd64', 'webui-amd64',
+    service_list = ['debomatic-arm64', 'webui-arm64',
+                    'debomatic-amd64', 'webui-amd64',
                     'debomatic-i386', 'webui-i386',
                     'debomatic-armel', 'webui-armel',
                     'debomatic-armhf', 'webui-armhf',
