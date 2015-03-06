@@ -24,6 +24,8 @@ import supybot.registry as registry
 import supybot.schedule as schedule
 import supybot.log as supylog
 
+from functools import cmp_to_key
+
 #import imaplib
 import re, os, sys, time, subprocess
 import xml.dom.minidom as minidom
@@ -785,14 +787,14 @@ class Launchpad(IBugtracker):
             if tasks.total_size != 1:
                 tasks = list(tasks)
                 try:
-                    tasks.sort(self._sort)
+                    sorted(tasks, key=cmp_to_key(self._sort))
                     taskdata = tasks[-1]
                 except ValueError:
                     tasks = [_ for _ in tasks if _.bug_target_name.endswith('(Ubuntu)')]
                     if tasks:
                         if len(tasks) != 1:
                             try:
-                                tasks.sort(self._sort)
+                                sorted(tasks, key=cmp_to_key(self._sort))
                                 taskdata = tasks[-1]
                             except ValueError:
                                 taskdata = bugdata.bug_tasks[bugdata.bug_tasks.total_size - 1]
