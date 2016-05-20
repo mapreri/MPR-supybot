@@ -11,8 +11,8 @@ import supybot.ircutils as ircutils
 import supybot.callbacks as callbacks
 
 import threading
+import subprocess
 from time import sleep
-from subprocess import check_output
 
 
 class Debomatic(callbacks.Plugin):
@@ -62,18 +62,26 @@ class Debomatic(callbacks.Plugin):
         L = []
         status = []
         statuses = {}
-        keys = ['arch', 'service', 'status']
-        out = check_output(['coffee', self.path])
+        try:
+            out = subprocess.check_output(['coffee', self.path], timeout=30)
+        except subprocess.TimeoutExpired as e:
+            if e.output:
+                out = e.output
+            else:
+                out = ''
         out = out.splitlines()
         for row in out:
             L.append(row)
         for row in L:
-            item = dict(zip(keys, row.split()))
+            item = {}
+            row = row.decode().split()
+            item['arch'] = row[0]
+            item['service'] = row[1]
+            item['status'] = ' '.join(row[2:])
             status.append(item)
         for i in status:
-            service = i['service'].decode('ascii') + '-' + \
-                      i['arch'].decode('ascii')
-            statuses[service] = i['status'].decode('ascii')
+            service = i['service'] + '-' + i['arch']
+            statuses[service] = i['status']
         return statuses
 
     def status(self, irc, msg, args, channel, name=None):
@@ -86,7 +94,10 @@ class Debomatic(callbacks.Plugin):
         if not name:
             status = self._do()
             for i in self.service_list:
-                if not status[i] == "running":
+                try:
+                    if not status[i] == "running":
+                        down.append(i)
+                except KeyError:
                     down.append(i)
             if not down:
                 msg = "Everything is up and running."
@@ -99,14 +110,17 @@ class Debomatic(callbacks.Plugin):
             irc.reply(msg)
         else:
             status = self._do()
-            if not status[name] == "running":
-                if not status[name]:
-                    msg = name + " is down! Come on! (No error message)"
+            try:
+                if not status[name] == "running":
+                    if not status[name]:
+                        msg = name + " is down! Come on! (No error message)"
+                    else:
+                        msg = name + " is down! Come on! Error message: " + \
+                              status[name]
                 else:
-                    msg = name + " is down! Come on! Error message: " + \
-                          status[name]
-            else:
-                msg = name + " is up and running!"
+                    msg = name + " is up and running!"
+            except KeyError:
+                msg = name + " is unreachable"
             irc.reply(msg)
     status = wrap(status, ['channel', optional('something')])
 
