@@ -20,13 +20,19 @@ class Debomatic(callbacks.Plugin):
     service. Anyway it watches the known Debomatic istances and notify you if
     something is wrong."""
     threaded = True
-    service_list = ['debomatic-arm64', 'webui-arm64',
-                    'debomatic-amd64', 'webui-amd64',
-                    'debomatic-i386', 'webui-i386',
-                    'debomatic-armel', 'webui-armel',
-                    'debomatic-armhf', 'webui-armhf',
-                    'debomatic-powerpc', 'webui-powerpc',
-                    'debomatic-s390x', 'webui-s390x']
+    service_list = [
+        'debomatic-amd64', 'webui-amd64',
+        'debomatic-i386', 'webui-i386',
+        'debomatic-arm64', 'webui-arm64',
+        'debomatic-armel', 'webui-armel',
+        'debomatic-armhf', 'webui-armhf',
+        'debomatic-mips64el', 'webui-mips64el',
+        'debomatic-mips', 'webui-mips',
+        'debomatic-mipsel', 'webui-mipsel',
+        'debomatic-powerpc', 'webui-powerpc',
+        'debomatic-ppc64el', 'webui-ppc64el',
+        'debomatic-s390x', 'webui-s390x',
+    ]
     path = '/home/mattia/ircbot/plugins/Debomatic/checkstatus.coffee'
 
     def __init__(self, irc):
