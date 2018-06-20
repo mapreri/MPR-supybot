@@ -2,6 +2,7 @@
 ###
 # Copyright (c) 2005-2007 Dennis Kaarsemaker
 # Copyright (c) 2008-2010 Terence Simpson
+# Copyright (c) 2017-     Krytarik Raido
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of version 2 of the GNU General Public License as
@@ -16,33 +17,17 @@
 
 from supybot.commands import *
 import supybot.utils as utils
-import supybot.ircmsgs as ircmsgs
 import supybot.ircutils as ircutils
+import supybot.ircdb as ircdb
 import supybot.callbacks as callbacks
 import supybot.conf as conf
 import supybot.registry as registry
-import supybot.schedule as schedule
 import supybot.log as supylog
 
-from functools import cmp_to_key
-
-#import imaplib
-import re, os, sys, time, subprocess
+import re, os, sys, time, json
 import xml.dom.minidom as minidom
-from html.entities import entitydefs as entities
 from email.parser import FeedParser
-if sys.version_info < (3,0):
-    import SOAPpy
-
-# All the words below will be censored when reporting bug information
-bad_words = set(["fuck","fuk","fucking","fuking","fukin","fuckin","fucked","fuked","fucker","shit","cunt","bastard","nazi","nigger","nigga","cock","bitches","bitch"])
-
-def makeClean(s):
-    words = s.split()
-    for word in words:
-        if word.lower() in bad_words:
-            words[words.index(word)] = "<censored>"
-    return " ".join(words)
+from pysimplesoap.client import SoapClient
 
 def registerBugtracker(name, url='', description='', trackertype=''):
     conf.supybot.plugins.Bugtracker.bugtrackers().add(name)
@@ -55,12 +40,48 @@ def registerBugtracker(name, url='', description='', trackertype=''):
     if description:
         DESC.setValue(description)
     if trackertype:
-        if trackertype.lower() in defined_bugtrackers:
-            TRACKERTYPE.setValue(trackertype.lower())
+        if trackertype in defined_bugtrackers:
+            TRACKERTYPE.setValue(trackertype)
         else:
             raise BugtrackerError("Unknown trackertype: %s" % trackertype)
-            
-entre = re.compile('&(\S*?);')
+
+def defaultIgnored(hostmask, recipient):
+    if not conf.supybot.defaultIgnore():
+        return False
+    if conf.version <= '0.83.4.1' \
+            and ircutils.isChannel(recipient):
+        return False
+    try:
+        user = ircdb.users.getUser(hostmask)
+    except KeyError:
+        return True
+    return False
+
+def checkIgnored(hostmask, recipient):
+    try:
+        user = ircdb.users.getUser(hostmask)
+        if user._checkCapability('owner'):
+            return False
+        elif user.ignore:
+            return True
+    except KeyError:
+        pass
+    if ircdb.ignores.checkIgnored(hostmask):
+        return True
+    if ircutils.isChannel(recipient):
+        c = ircdb.channels.getChannel(recipient)
+        if c.checkIgnored(hostmask):
+            return True
+    return False
+
+def checkAddressed(text, channel):
+    if channel:
+        if text[0] in str(conf.supybot.reply.whenAddressedBy.chars.get(channel)):
+            return True
+    elif text[0] in conf.supybot.reply.whenAddressedBy.chars():
+        return True
+    return False
+
 def _getnodetxt(node):
     L = []
     for childnode in node.childNodes:
@@ -76,13 +97,14 @@ def _getnodetxt(node):
                 val = val.decode('base64')
             except:
                 val = 'Cannot convert bug data from base64.'
-    while entre.search(val):
-        entity = entre.search(val).group(1)
-        if entity in entities:
-            val = entre.sub(entities[entity], val)
-        else:
-            val = entre.sub('?', val)
-    return val
+    return utils.web.htmlToText(val, tagReplace='')
+
+def _getnodeattr(node, attr):
+    if node.hasAttribute(attr):
+        val = node.getAttribute(attr)
+    else:
+        raise ValueError("No such attribute")
+    return utils.web.htmlToText(val, tagReplace='')
 
 class BugtrackerError(Exception):
     """A bugtracker error"""
@@ -92,50 +114,30 @@ class BugNotFoundError(Exception):
     """Pity, bug isn't there"""
     pass
 
-cvere = re.compile(r'<th.*?Description.*?<td.*?>(.*?)\s*</td>', re.I | re.DOTALL)
+cvere = re.compile(r'<th[^>]*>Description</th>.*?<td[^>]*>\s*(?P<cve>.*?)\s*</td>', re.I | re.DOTALL)
+cverre = re.compile(r'<h2[^>]*>\s*(?P<cverr>.*?)\s*</h2>', re.I | re.DOTALL)
 class Bugtracker(callbacks.PluginRegexp):
     """Show a link to a bug report with a brief description"""
     threaded = True
-    callBefore = ['URL']
-    regexps = ['turlSnarfer', 'bugSnarfer', 'oopsSnarfer', 'cveSnarfer']
+    callBefore = ('URL')
+    regexps = ('turlSnarfer', 'bugSnarfer', 'cveSnarfer', 'oopsSnarfer')
 
     def __init__(self, irc):
-        callbacks.PluginRegexp.__init__(self, irc)
+        self.__parent = super(Bugtracker, self)
+        self.__parent.__init__(irc)
         self.db = ircutils.IrcDict()
-#        self.events = []
         for name in self.registryValue('bugtrackers'):
             registerBugtracker(name)
             group = self.registryValue('bugtrackers.%s' % name.replace('.','\\.'), value=False)
-            if group.trackertype() in list(defined_bugtrackers.keys()):
-                self.db[name] = defined_bugtrackers[group.trackertype()](name, group.url(), group.description())
+            if group.trackertype() in defined_bugtrackers:
+                self.db[name] = defined_bugtrackers[group.trackertype()](name, group.url(), group.description(), group.trackertype())
             else:
-                self.log.warning("Bugtracker: Unknown trackertype: %s (%s)" % (group.trackertype(), name))
+                supylog.warning("Bugtracker: Unknown trackertype: %s (%s)" % (group.trackertype(), name))
         self.shorthand = utils.abbrev(list(self.db.keys()))
         self.shown = {}
 
-#        # Schedule bug reporting
-#        #TODO: Remove everything below this line
-#        if self.registryValue('imap_server') and self.registryValue('reportercache'):
-#            try:
-#                schedule.removeEvent(self.name() + '.bugreporter')
-#            except:
-#                pass
-#            schedule.addPeriodicEvent(lambda: self.reportnewbugs(irc),  60, name=self.name() + '.bugreporter')
-#            self.events += [self.name() + '.bugreporter']
-#            self.log.info('Bugtracker: Adding scheduled event "%s.bugreporter"' % self.name())
-
-    def die(self): #TODO: Remove me
-        pass
-#        try:
-#           for event in self.events:
-#                self.log.info('Bugtracker: Removing scheduled event "%s"' % event)
-#                schedule.removeEvent(event)
-#                schedule.removeEvent(self.name())
-#        except:
-#            pass
-
     def is_ok(self, channel, tracker, bug):
-        '''Flood/repeat protection'''
+        """Flood/repeat protection"""
         now = time.time()
         for k in list(self.shown.keys()):
             if self.shown[k] < now - self.registryValue('repeatdelay', channel):
@@ -145,109 +147,15 @@ class Bugtracker(callbacks.PluginRegexp):
             return True
         return False
 
-    def is_new(self, tracker, tag, id): #Depricated
-        pass
-#        bugreporter_base = self.registryValue('reportercache')
-#        if not os.path.exists(os.path.join(bugreporter_base,tag,tracker.name,str(int(id/1000)),str(id))):
-#            try:
-#                os.makedirs(os.path.join(bugreporter_base,tag,tracker.name,str(int(id/1000))))
-#            except:
-#                pass
-#            fd = open(os.path.join(bugreporter_base,tag,tracker.name,str(int(id/1000)),str(id)),'w')
-#            fd.close()
-#            return True
-#        return False
-
-    def reportnewbugs(self,irc): #Depricated
-        pass
-#        # Compile list of bugs
-#        self.log.info("Bugtracker: Checking for new bugs")
-#        bugs = {}
-#        if self.registryValue('imap_ssl'):
-#            sc = imaplib.IMAP4_SSL(self.registryValue('imap_server'))
-#        else:
-#            sc = imaplib.IMAP4(self.registryValue('imap_server'))
-#        sc.login(self.registryValue('imap_user'), self.registryValue('imap_password'))
-#        sc.select('INBOX')
-#        new_mail = sc.search(None, '(UNSEEN)')[1][0].split()[:20]
-#
-#        # Read all new mail
-#        for m in new_mail:
-#            msg = sc.fetch(m, 'RFC822')[1][0][1]
-#            fp = FeedParser()
-#            sc.store(m, '+FLAGS', "(\Deleted)") # Mark message deleted so we don't have to process it again
-#            fp.feed(msg)
-#            bug = fp.close()
-#            tag = None
-#
-#            if 'X-Launchpad-Bug' not in bug.keys():
-#                self.log.info('Bugtracker: Ignoring e-mail with no detectable bug (Not from Launchpad)')            
-#                continue
-#            else:
-#                tag = bug['X-Launchpad-Bug']
-#                if 'distribution=' not in tag and 'product=' not in tag:
-#                   self.log.info('Bugtracker: Ignoring e-mail with no detectable bug (no distro/product)')
-#                    continue
-#                else:
-#                    tag = tag.split(';')[0].strip().replace("product=",'').replace("distribution=","")
-#
-#            if not tag:
-#                self.log.info('Bugtracker: Ignoring e-mail with no detectible bug (bad tag)')
-#
-#            tag = tag[tag.find('+')+1:tag.find('@')]
-#            if tag not in bugs:
-#                bugs[tag] = {}
-#
-#            # Determine bugtracker type (currently only Launchpad is supported anyway)
-#            if bug['X-Launchpad-Bug']:
-#                tracker = self.db['launchpad']
-#                id = int(bug['Reply-To'].split()[1])
-#                subj = bug['Subject'];
-#                if '[NEW]' not in subj: #Not a new bug
-#                    continue
-#                if self.is_new(tracker, tag, id):
-#                    component = bug['X-Launchpad-Bug']
-#                    if 'component' in component:
-#                        component = component[component.find('component=')+10:]
-#                        component = component[:component.find(';')].replace('None','')
-#                    else:
-#                        component = ''
-#                    try:
-#                        if component:
-#                            bugs[tag][id] = self.get_bug('',tracker, id, False)[0].replace('"','(%s) "' % component, 1)
-#                        else:
-#                            bugs[tag][id] = self.get_bug('',tracker, id, False)[0]
-#                        if '[apport]' in bugs[tag][id]:
-#                            bugs[tag].pop(id)
-#                    except:
-#                        self.log.info("Bugtracker: Unable to get new bug %d" % id)
-#                        pass
-#            else:
-#                self.log.info('Bugtracker: Ignoring e-mail with no detectable bug')
-#
-#        reported_bugs = 0
-#
-#        for c in irc.state.channels:
-#            tags = self.registryValue('bugReporter', channel=c)
-#            if not tags:
-#                continue
-#            for tag in tags.split(','):
-#                if not tag or tag not in bugs.keys():
-#                    continue
-#                for b in sorted(bugs[tag].keys()):
-#                    irc.queueMsg(ircmsgs.privmsg(c,'New bug: #%s' % bugs[tag][b][bugs[tag][b].find('bug ')+4:]))
-#                    reported_bugs = reported_bugs+1
-
     def add(self, irc, msg, args, name, trackertype, url, description):
         """<name> <type> <url> [<description>]
 
-        Add a bugtracker <url> to the list of defined bugtrackers. <type> is the
-        type of the tracker (currently only Launchpad, Debbugs, Bugzilla,
-        Issuezilla, Mantis and Trac are known). <name> is the name that will be used to
-        reference the bugzilla in all commands. Unambiguous abbreviations of
-        <name> will be accepted also.  <description> is the common name for the
-        bugzilla and will be listed with the bugzilla query; if not given, it
-        defaults to <name>.
+        Add a bugtracker to the list of defined bugtrackers. Currently supported types are
+        Launchpad, Debbugs, Bugzilla, SourceForge, Github, GitLab, Gitea, Mantis, and Trac.
+        <name> will be used to reference the bugtracker in all commands.
+            Unambiguous abbreviations of it will also be accepted.
+        <description> will be used to reference the bugtracker in the
+            query result. If not given, it defaults to <name>.
         """
         name = name.lower()
         if not description:
@@ -256,7 +164,7 @@ class Bugtracker(callbacks.PluginRegexp):
             url = url[:-1]
         trackertype = trackertype.lower()
         if trackertype in defined_bugtrackers:
-            self.db[name] = defined_bugtrackers[trackertype](name,url,description)
+            self.db[name] = defined_bugtrackers[trackertype](name, url, description, trackertype)
         else:
             irc.error("Bugtrackers of type '%s' are not understood" % trackertype)
             return
@@ -278,7 +186,7 @@ class Bugtracker(callbacks.PluginRegexp):
             self.shorthand = utils.abbrev(list(self.db.keys()))
             irc.replySuccess()
         except KeyError:
-            s = self.registryValue('replyNoBugtracker', ircutils.isChannel(msg.args[0]) and msg.args[0] or None)
+            s = self.registryValue('replyNoBugtracker', msg.args[0] if ircutils.isChannel(msg.args[0]) else None)
             irc.error(s % name)
     remove = wrap(remove, [('checkCapability', 'admin'), 'text'])
 
@@ -293,16 +201,16 @@ class Bugtracker(callbacks.PluginRegexp):
             d = group.description()
             if newdesc:
                 d = newdesc
-            self.db[newname] = defined_bugtrackers[group.trackertype()](name,group.url(),d)
+            self.db[newname] = defined_bugtrackers[group.trackertype()](name, group.url(), d)
             registerBugtracker(newname, group.url(), d, group.trackertype())
             del self.db[name]
             self.registryValue('bugtrackers').remove(name)
             self.shorthand = utils.abbrev(list(self.db.keys()))
             irc.replySuccess()
         except KeyError:
-            s = self.registryValue('replyNoBugtracker', ircutils.isChannel(msg.args[0]) and msg.args[0] or None)
+            s = self.registryValue('replyNoBugtracker', msg.args[0] if ircutils.isChannel(msg.args[0]) else None)
             irc.error(s % name)
-    rename = wrap(rename, [('checkCapability', 'admin'), 'something','something', additional('text')])
+    rename = wrap(rename, [('checkCapability', 'admin'), 'something', 'something', additional('text')])
 
     def list(self, irc,  msg, args, name):
         """[abbreviation]
@@ -314,11 +222,11 @@ class Bugtracker(callbacks.PluginRegexp):
             name = name.lower()
             try:
                 name = self.shorthand[name]
-                (url, description, type) = (self.db[name].url, self.db[name].description,
+                (url, description, trackertype) = (self.db[name].url, self.db[name].description,
                                             self.db[name].__class__.__name__)
-                irc.reply('%s: %s, %s [%s]' % (name, description, url, type))
+                irc.reply('%s: %s, %s [%s]' % (name, description, url, trackertype))
             except KeyError:
-                s = self.registryValue('replyNoBugtracker', ircutils.isChannel(msg.args[0]) and msg.args[0] or None)
+                s = self.registryValue('replyNoBugtracker', msg.args[0] if ircutils.isChannel(msg.args[0]) else None)
                 irc.error(s % name)
         else:
             if self.db:
@@ -329,51 +237,50 @@ class Bugtracker(callbacks.PluginRegexp):
                 irc.reply('I have no defined bugtrackers.')
     list = wrap(list, [additional('text')])
 
+    def inFilter(self, irc, msg):
+        if not msg.prefix:
+            return msg
+        if not defaultIgnored(msg.prefix, msg.args[0]):
+            return msg
+        if checkIgnored(msg.prefix, msg.args[0]):
+            return msg
+        if msg.command == 'PRIVMSG':
+            self.doPrivmsg(irc, msg)
+        return msg
+
     def bugSnarfer(self, irc, msg, match):
-        r"""\b(?P<bt>(([a-z0-9]+)?\s+bugs?|[a-z0-9]+)):?\s+#?(?P<bug>\d+(?!\d*[\-\.]\d+)((,|\s*(and|en|et|und|ir))\s*#?\d+(?!\d*[\-\.]\d+))*)"""
-        channel = ircutils.isChannel(msg.args[0]) and msg.args[0] or None
+        r"(?P<bt>[a-z][^\s:]*(\s+bugs?)?):*\s+#?(?P<bug>\d+(?!\d*[-.]\d+)(\s*([,\s]+|[,\s]*(and|und|en|et|ir|[&+]+))\s*#?\d+(?!\d*[-.]\d+))*)"
+        channel = msg.args[0] if ircutils.isChannel(msg.args[0]) else None
+        if checkAddressed(msg.args[1].strip(), channel):
+            return
         if not self.registryValue('bugSnarfer', channel):
             return
-        nbugs = msg.tagged('nbugs')
-        if not nbugs: nbugs = 0
+        nbugs = msg.tagged('nbugs') or 0
         if nbugs >= 5:
             return
 
-        # Don't double on commands
-        s = str(msg).split(':')[2]
-        if s and s[0] in str(conf.supybot.reply.whenAddressedBy.chars):
-            return
-
-        sure_bug = match.group('bt').endswith('bug') or match.group('bt').endswith('bug')
-
-        # Get tracker name
-        bugids = match.group('bug')
-        reps = ((' ',''),('#',''),('and',','),('en',','),('et',','),('und',','),('ir',','))
-        for r in reps:
-            bugids = bugids.replace(r[0],r[1])
-        bugids = bugids.split(',')[:5-nbugs]
+        bugids = re.split(r'[^\d]+', match.group('bug'))[:5-nbugs]
 
         # Begin HACK
-        # strings like "ubuntu 1004" and "ubuntu 1010" are false triggers for us
-        # filter out bug number that are 4 numbers, start with '1' and end in '04' or '10
-        # (let's fix this for 2020 ;)
+        # Strings like "Ubuntu 1004" and "Ubuntu 1610" are false triggers for us
         if match.group('bt').lower() == 'ubuntu':
-            bugids = [bugnum for bugnum in bugids if not (len(bugnum) == 4 and bugnum[0] == '1' and bugnum[2:] in ('04', '10'))]
+            bugids = [x for x in bugids if not re.match(r'^([4-9]|[12][0-9])(04|10)$', x)]
         # End HACK
+
+        # Get tracker name
+        bt = [x.lower() for x in match.group('bt').split()]
+        sure_bug = bt[-1] in ('bug', 'bugs')
+
+        bugids = list(set(bugids)) # remove dupes
 
         if not sure_bug:
             bugids = [x for x in bugids if int(x) > 100]
 
-        bugids = list(set(bugids)) ## remove dups
-
         msg.tag('nbugs', nbugs + len(bugids))
-        bt = [x.lower() for x in match.group('bt').split()]
-        # Strip off trailing ':' from the tracker name. Allows for (LP: #nnnnnn)
-        if bt and bt[0].endswith(':'):
-            bt[0] = bt[:-1]
+
         name = ''
         showTracker = True
-        if len(bt) == 1 and not (bt[0] in ['bug','bugs']):
+        if len(bt) == 1 and not sure_bug:
             try:
                 name = bt[0]
                 tracker = self.db[name]
@@ -385,195 +292,222 @@ class Bugtracker(callbacks.PluginRegexp):
                 tracker = self.db[name]
             except:
                 name = ''
-                pass
+
         if not name:
             showTracker = False
             snarfTarget = self.registryValue('snarfTarget', channel)
             if not snarfTarget:
-                self.log.warning("Bugtracker: no snarfTarget for Bugtracker")
+                supylog.warning("Bugtracker: No snarfTarget set")
                 return
             try:
                 name = self.shorthand[snarfTarget.lower()]
+                tracker = self.db[name]
             except:
-               s = self.registryValue('replyNoBugtracker', name)
-               irc.error(s % name)
-        try:
-            tracker = self.db[name]
-        except KeyError:
-            s = self.registryValue('replyNoBugtracker', name)
-            irc.error(s % name)
-        else:
-            for bugid in bugids:
-                bugid = int(bugid)
-                try:
-                    report = self.get_bug(channel,tracker,bugid,self.registryValue('showassignee', channel), show_tracker=showTracker)
-                except BugNotFoundError:
-                    if self.registryValue('replyWhenNotFound'):
-                        irc.error("%s bug %d could not be found" % (tracker.description, bugid))
-                except BugtrackerError as e:
-#                    if 'private' in str(e):
-#                        irc.reply("Bug %d on http://launchpad.net/bugs/%d is private" % (bugid, bugid))
-#                        return
-                    if not sure_bug and bugid < 30:
-                        return
-                    irc.error(str(e))
-                else:
-                    for r in report:
-                        irc.reply(makeClean(r), prefixNick=False)
+                s = self.registryValue('replyNoBugtracker', name)
+                irc.error(s % name)
+                return
+
+        for bugid in bugids:
+            bugid = int(bugid)
+            try:
+                report = self.get_bug(channel or msg.nick, tracker, bugid, self.registryValue('showassignee', channel),
+                                      self.registryValue('extended', channel), do_tracker=showTracker)
+            except BugNotFoundError:
+                if self.registryValue('replyWhenNotFound'):
+                    irc.error("Could not find %s bug %d" % (tracker.description, bugid))
+            except BugtrackerError as e:
+                if not sure_bug and bugid < 30:
+                    return
+                irc.error(str(e))
+            else:
+                if report:
+                    irc.reply(report)
 
     def turlSnarfer(self, irc, msg, match):
-        r"(?P<tracker>https?://\S*?)/(?:Bugs/0*|str.php\?L|show_bug.cgi\?id=|bugreport.cgi\?bug=|(?:bugs|\+bug)/|ticket/|tracker/|\S*aid=|bug=)?(?P<bug>\d+)(?P<sfurl>&group_id=\d+&at_id=\d+)?"
-        channel = ircutils.isChannel(msg.args[0]) and msg.args[0] or None
+        r"(https?://)?((bugs\.debian\.org|pad\.lv)/|\S+/(show_bug\.cgi\?id=|bugreport\.cgi\?bug=|view\.php\?id=|bug=|bugs/|\+bug/|ticket/|feature-requests/|patches/|todo/|issues/|pulls?/|merge_requests/))(?P<bug>\d+)/?"
+        channel = msg.args[0] if ircutils.isChannel(msg.args[0]) else None
+        if checkAddressed(msg.args[1].strip(), channel):
+            return
         if not self.registryValue('bugSnarfer', channel):
             return
-        nbugs = msg.tagged('nbugs')
-        if not nbugs: nbugs = 0
+        nbugs = msg.tagged('nbugs') or 0
         if nbugs >= 5:
             return
         msg.tag('nbugs', nbugs+1)
+        url = match.group(0)
+        bugid = int(match.group('bug'))
+        if '://' in url:
+            url = url[url.rfind('://')+3:]
         try:
-            tracker = self.get_tracker(match.group(0),match.group('sfurl'))
+            tracker = self.get_tracker(url, bugid)
             if not tracker:
                 return
-            report = self.get_bug(channel, tracker, int(match.group('bug')), self.registryValue('showassignee', channel), do_url = False)
+            report = self.get_bug(channel or msg.nick, tracker, bugid, self.registryValue('showassignee', channel),
+                                  self.registryValue('extended', channel), do_url=False)
         except BugtrackerError as e:
             irc.error(str(e))
-        except BugNotFoundError as e:
-            irc.error("%s bug %s not found" % (tracker, match.group('bug')))
+        except BugNotFoundError:
+            if self.registryValue('replyWhenNotFound'):
+                irc.error("Could not find %s bug %s" % (tracker.description, match.group('bug')))
         else:
-            for r in report:
-                irc.reply(makeClean(r), prefixNick=False)
+            if report:
+                irc.reply(report)
 
-    # Only useful for launchpad developers
+    # Only useful to Launchpad developers
     def oopsSnarfer(self, irc, msg, match):
-        r"(?:https?://pad.lv/){0}?OOPS-(?P<oopsid>\d*[\dA-Z]{3,})"
-        channel = ircutils.isChannel(msg.args[0]) and msg.args[0] or None
+        r"(https?://\S+[=/])?OOPS-(?P<oopsid>[\dA-Za-z]{6,})"
+        channel = msg.args[0] if ircutils.isChannel(msg.args[0]) else None
+        if checkAddressed(msg.args[1].strip(), channel):
+            return
         if not self.registryValue('bugSnarfer', channel) or not self.registryValue('oopsSnarfer', channel):
             return
-        oopsid = match.group(1)
-        if oopsid.lower() == "tools":
+        oopsid = match.group('oopsid')
+        if not self.is_ok(channel or msg.nick, 'lpoops', oopsid):
             return
-        if not self.is_ok(channel, 'lpoops', oopsid):
-            return
-        irc.reply('https://oops.canonical.com/?oopsid=OOPS-' + oopsid, prefixNick=False)
+        if not match.group(1):
+            irc.reply('https://oops.canonical.com/?oopsid=OOPS-%s' % oopsid)
 
     def cveSnarfer(self, irc, msg, match):
-        r"(cve[- ]\d{4}[- ]\d{4})"
-        channel = ircutils.isChannel(msg.args[0]) and msg.args[0] or None
+        r"(https?://\S+=)?CVE[- ](?P<cveid>\d{4}[- ]\d{4,})"
+        channel = msg.args[0] if ircutils.isChannel(msg.args[0]) else None
+        if checkAddressed(msg.args[1].strip(), channel):
+            return
         if not self.registryValue('bugSnarfer', channel) or not self.registryValue('cveSnarfer', channel):
             return
-        cve = match.group(1).replace(' ','-').upper()
-        if not self.is_ok(channel, 'cve', cve):
+        cveid = match.group('cveid').replace(' ','-')
+        if not self.is_ok(channel or msg.nick, 'cve', cveid):
             return
-        url = 'http://cve.mitre.org/cgi-bin/cvename.cgi?name=%s' % cve
-        cvedata = utils.web.getUrl(url)
+        url = 'https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-%s' % cveid
+        try:
+            cvedata = utils.web.getUrl(url).decode('utf-8')
+        except Exception as e:
+            raise BugtrackerError('Could not get CVE data: %s (%s)' % (e, url))
         m = cvere.search(cvedata)
         if m:
-            cve = m.group(1).replace('\n', ' ')
+            cve = utils.web.htmlToText(m.group('cve'), tagReplace='')
             if len(cve) > 380:
                 cve = cve[:380] + '...'
-            irc.reply("%s (%s)" % (cve,url), prefixNick=False)
+            if not match.group(1):
+                cve += ' <%s>' % url
+            irc.reply(cve)
+        else:
+            m = cverre.search(cvedata)
+            if m:
+                cverr = utils.web.htmlToText(m.group('cverr'), tagReplace='')
+                irc.reply(cverr)
 
-#TODO: as we will depend on launchpadlib, we should consider using lazr.uri.URI to do URL parsing
-    def get_tracker(self, snarfurl, sfdata):
-        snarfurl = snarfurl.replace('sf.net','sourceforge.net')
-        snarfhost = snarfurl.replace('http://','').replace('https://','')
+    #TODO: As we will depend on launchpadlib, we should consider using lazr.uri.URI to do URL parsing
+    def get_tracker(self, snarfurl, bugid):
+        # SourceForge short domain
+        snarfurl = snarfurl.replace('sf.net', 'sourceforge.net', 1)
 
-        # Begin HACK
-        # launchpad.net has many URLs that can confuse us
-        # make sure 'bug' in in the URL, somewhere
-        if 'launchpad' in snarfhost:
-            if not 'bug' in snarfhost: # Not a bug URL
-                return None
-            if snarfhost.lower().startswith("code."):
-                return None
-
-        if snarfhost.startswith('pad.lv'): # Launchpad URL shortening
-            snarfhost = snarfhost[:snarfhost.rfind('/')]
-            snarfhost = '/'.join( (_ for _ in snarfhost.split('/') if _) )
-            if '/' in snarfhost: # it's not a bug URL
-                return None
-            return self.db.get('launchpad', None)
-        # End HACK
-
-        # At this point, we are only interested in the host part of the URL
-        if '/' in snarfurl:
-            snarfhost = snarfhost[:snarfhost.index('/')]
-
-        if 'sourceforge.net' in snarfurl: # See below
-            return None
+        # Launchpad URL shortening
+        snarfurl = re.sub(r'pad\.lv/(bug=)?(?P<bug>[0-9]+)', r'launchpad.net/bugs/\g<bug>', snarfurl)
 
         for t in list(self.db.keys()):
             tracker = self.db.get(t, None)
             if not tracker:
-                self.log.error("No tracker for key %r" % t)
+                supylog.error("No tracker for key '%s'" % t)
                 continue
-            url = tracker.url.replace('http://','').replace('https://','')
-
-            if 'sourceforge.net' in url:
-                # sourceforge.net has no API or structured bug exporting, HTML
-                # scraping is not good enough. Especially as SF keep changing it
-                continue
-
-            if '/' in url:
-                url = url[:url.index('/')]
-            if url in snarfhost:
+            url = tracker.url[tracker.url.rfind('://')+3:]
+            if url in snarfurl:
                 return tracker
 
-        if snarfhost == 'pad.lv': # Launchpad URL shortening
-            return self.db.get('lp', None)
-
-        # No tracker found, bummer. Let's try and add one
+        # No tracker found, bummer. Let's try and get one
         if 'show_bug.cgi' in snarfurl:
             tracker = Bugzilla().get_tracker(snarfurl)
-            if tracker:
-                self.db[tracker.name] = tracker
-                self.shorthand = utils.abbrev(list(self.db.keys()))
-                return tracker
-        return None
+        elif 'sourceforge.net' in snarfurl:
+            tracker = SourceForge().get_tracker(snarfurl)
+        elif 'github.com' in snarfurl:
+            tracker = GitHub().get_tracker(snarfurl)
+        elif re.match(r'[^\s/]+/[^\s/]+/[^\s/]+/(issues|pulls|merge_requests)', snarfurl):
+            tracker = GitLab().get_tracker(snarfurl, bugid)
+            if not tracker:
+                tracker = Gitea().get_tracker(snarfurl, bugid)
+        elif 'view.php' in snarfurl:
+            tracker = Mantis().get_tracker(snarfurl)
+        elif '/ticket/' in snarfurl:
+            tracker = Trac().get_tracker(snarfurl)
+        else:
+            return
 
-    def get_bug(self, channel, tracker, id, do_assignee, do_url = True, show_tracker = True):
-        reports = []
+        if tracker:
+            self.db[tracker.name] = tracker
+            self.shorthand = utils.abbrev(list(self.db.keys()))
+            return tracker
+
+    def get_bug(self, channel, tracker, id, do_assignee, do_extinfo, do_url=True, do_tracker=True):
         if not self.is_ok(channel, tracker, id):
-            return []
-        for r in tracker.get_bug(id):
-            showext = self.registryValue('extended', channel)
-            extinfo = ''
-            if len(r) == 8:
-                (bid, product, title, severity, status, assignee, url, extinfo) = r
-            else:
-                (bid, product, title, severity, status, assignee, url) = r
+            return
 
-            severity = severity[0].upper() + severity[1:].lower()
-            status = status[0].upper() + status[1:].lower()
-            tracker_name = tracker.description + ' '
-            if not do_url:
-                url = ''
-            if not show_tracker:
-                tracker_name = ''
-            if product:
-                if showext:
-                    reports.append("%sbug %s in %s \"%s\" %s [%s,%s] %s" % (tracker_name, bid, product, 
-                                                                          title, extinfo, severity, status, url))
-                else:
-                    reports.append("%sbug %s in %s \"%s\" [%s,%s] %s" % (tracker_name, bid, product, 
-                                                                          title, severity, status, url))
+        bugdata = tracker.get_bug(id)
+        if not bugdata:
+            return
+
+        (bid, product, title, severity, status, assignee, url, extinfo, duplicate) = bugdata
+
+        if duplicate and not self.is_ok(channel, tracker, bid):
+            return
+
+        bugtype = re.match(r'.*/(feature-)?(?P<type>request|patch|todo|issue|pull|merge|ticket)(_requests)?(e?s)?/[0-9]+/?$', url)
+        if do_tracker and tracker.trackertype not in ('github', 'gitlab', 'gitea'):
+            if re.match(r'.*/(bugs|feature-requests|patches|todo|issues|pulls?|merge_requests|ticket)/?$', tracker.description):
+                report = '%s %d' % (tracker.description, bid)
             else:
-                if showext:
-                    reports.append("%sbug %s \"%s\" %s [%s,%s] %s" % (tracker_name, bid, title, extinfo, severity, status, url))
+                if bugtype:
+                    report = '%s %s %d' % (tracker.description, bugtype.group('type'), bid)
                 else:
-                    reports.append("%sbug %s \"%s\" [%s,%s] %s" % (tracker_name, bid, title, severity, status, url))
-            if do_assignee and assignee:
-                reports[-1] = reports[-1] + (" - Assigned to %s" % assignee)
-        return reports
+                    report = '%s bug %d' % (tracker.description, bid)
+        else:
+            if bugtype:
+                report = '%s %d' % (bugtype.group('type').title(), bid)
+            else:
+                report = 'Bug %d' % bid
+
+        if product:
+            report += ' in %s' % product
+
+        report += ' "%s"' % title.replace('"', "'").strip()
+
+        if do_extinfo and extinfo:
+            report += ' (%s)' % ', '.join(extinfo)
+
+        if do_assignee and assignee:
+            report += ' (assigned: %s)' % assignee
+
+        severity_status = []
+        if severity:
+            severity_status.append(' '.join(word[0].upper() + word[1:].lower() for word in severity.split()))
+        severity_status.append(' '.join(word[0].upper() + word[1:].lower() for word in status.split()))
+        report += ' [%s]' % ', '.join(severity_status)
+
+        if duplicate:
+            report += ' [duplicate: %s]' % duplicate[0]
+
+        if do_url:
+            report += ' %s' % url
+
+        message_max = 450 - len(channel)
+        if len(report) > message_max:
+            report_parts = report.split('"')
+            report_start = report_parts[0]
+            report_end = report_parts[-1]
+            report_title = '"'.join(report_parts[1:-1])
+            title_max = message_max - len(report_start) - len(report_end) - 5
+            report_title_cut = report_title[:title_max].rsplit(None, 1)[0] + '...'
+            report = '%s"%s"%s' % (report_start, report_title_cut, report_end)
+
+        return report
 
 # Define all bugtrackers
 class IBugtracker:
-    def __init__(self, name=None, url=None, description=None):
+    def __init__(self, name=None, url=None, description=None, trackertype=None):
         self.name        = name
         self.url         = url
         self.description = description
-        self.log         = supylog # Convenience log wrapper
+        self.trackertype = trackertype
+        self.errget      = 'Could not get data from %s: %s (%s)'
+        self.errparse    = 'Could not parse data from %s: %s (%s)'
 
     def get_bug(self, id):
         raise BugTrackerError("Bugtracker class does not implement get_bug")
@@ -595,36 +529,53 @@ class IBugtracker:
 
 class Bugzilla(IBugtracker):
     def get_tracker(self, url):
-        url += '&ctype=xml'
         try:
-            bugxml = utils.web.getUrl(url)
-            tree = minidom.parseString(bugxml)
-            url  = str(tree.getElementsByTagName('bugzilla')[0].attributes['urlbase'].childNodes[0].data)
-            if url[-1] == '/':
-                url = url[:-1]
-            name = url[url.find('//') + 2:]
-            if '/' in name:
-                name = name[:name.find('/')]
-            desc = name
-            registerBugtracker(name, url, desc, 'bugzilla')
-            tracker = Bugzilla(name, url, desc)
-            return tracker
+            match = re.match(r'(?P<url>(?P<name>[^\s/]+).*)/show_bug\.cgi', url)
+            name  = desc = match.group('name')
+            url   = 'https://%s' % match.group('url')
+#            registerBugtracker(name, url, desc, 'bugzilla')
+            return Bugzilla(name, url, desc, 'bugzilla')
         except:
-            return None
+            pass
+
     def get_bug(self, id):
-        url = "%s/show_bug.cgi?id=%d&ctype=xml" % (self.url,id)
+        url = "%s/rest/bug/%d" % (self.url, id)
+        try:
+            bugjson = utils.web.getUrl(url)
+            bug = json.loads(bugjson.decode('utf-8'))['bugs'][0]
+        except Exception as e:
+            # For old-stable Bugzilla
+            if 'HTTP Error 404' in str(e):
+                return self.get_bug_old(id)
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        try:
+            status = bug['status']
+            if bug['resolution']:
+                status += ': %s' % bug['resolution']
+            if bug['assigned_to_detail']:
+                assignee = bug['assigned_to_detail']['real_name']
+                if not assignee:
+                    assignee = bug['assigned_to_detail']['name']
+            else:
+                assignee = ''
+            return (id, bug['product'], bug['summary'], bug['severity'], status, assignee,
+                    "%s/show_bug.cgi?id=%d" % (self.url, id), [], [])
+        except Exception as e:
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+
+    def get_bug_old(self, id): # Deprecated
+        url = "%s/show_bug.cgi?id=%d&ctype=xml" % (self.url, id)
         try:
             bugxml = utils.web.getUrl(url)
             zilladom = minidom.parseString(bugxml)
         except Exception as e:
-            s = 'Could not parse XML returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
+            raise BugtrackerError(self.errget % (self.description, e, url))
         bug_n = zilladom.getElementsByTagName('bug')[0]
         if bug_n.hasAttribute('error'):
             errtxt = bug_n.getAttribute('error')
             if errtxt == 'NotFound':
                 raise BugNotFoundError
-            s = 'Error getting %s bug #%s: %s' % (self.description, id, errtxt)
+            s = 'Error getting %s bug #%d: %s' % (self.description, id, errtxt)
             raise BugtrackerError(s)
         try:
             title = _getnodetxt(bug_n.getElementsByTagName('short_desc')[0])
@@ -633,53 +584,23 @@ class Bugzilla(IBugtracker):
                 status = "%s: %s" % (status, _getnodetxt(bug_n.getElementsByTagName('resolution')[0]))
             except:
                 pass
-            component = _getnodetxt(bug_n.getElementsByTagName('component')[0])
+            product = _getnodetxt(bug_n.getElementsByTagName('product')[0])
             severity = _getnodetxt(bug_n.getElementsByTagName('bug_severity')[0])
-            assignee = '(unavailable)'
             try:
-                assignee = _getnodetxt(bug_n.getElementsByTagName('assigned_to')[0])
+                assignee = _getnodeattr(bug_n.getElementsByTagName('assigned_to')[0], 'name')
             except:
-                pass
+                try:
+                    assignee = _getnodetxt(bug_n.getElementsByTagName('assigned_to')[0])
+                except:
+                    assignee = ''
         except Exception as e:
-            s = 'Could not parse XML returned by %s bugzilla: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
-        return [(id, component, title, severity, status, assignee, "%s/show_bug.cgi?id=%d" % (self.url, id))]
-
-class Issuezilla(Bugzilla):
-    pass
-#class Issuezilla(IBugtracker):
-#    def get_bug(self, id):
-#        url = "%s/show_bug.cgi?id=%d&ctype=xml" % (self.url,id)
-#        try:
-#            bugxml = utils.web.getUrl(url)
-#            zilladom = minidom.parseString(bugxml)
-#        except Exception, e:
-#            s = 'Could not parse XML returned by %s: %s (%s)' % (self.description, e, url)
-#            raise BugtrackerError, s
-#        bug_n = zilladom.getElementsByTagName('issue')[0]
-#        if not (bug_n.getAttribute('status_code') == '200'):
-#            if bug_n.getAttribute('status_message') == 'NotFound':
-#                raise BugNotFoundError
-#            s = 'Error getting %s bug #%s: %s' % (self.description, id, bug_n.getAttribute('status_message'))
-#            raise BugtrackerError, s
-#        try:
-#            title = _getnodetxt(bug_n.getElementsByTagName('short_desc')[0])
-#            status = _getnodetxt(bug_n.getElementsByTagName('issue_status')[0])
-#            try:
-#                status = "%s: %s" % (status, _getnodetxt(bug_n.getElementsByTagName('resolution')[0]))
-#            except:
-#                pass
-#            component = _getnodetxt(bug_n.getElementsByTagName('component')[0])
-#            severity = _getnodetxt(bug_n.getElementsByTagName('issue_type')[0])
-#            assignee = _getnodetxt(bug_n.getElementsByTagName('assigned_to')[0])
-#        except Exception, e:
-#            s = 'Could not parse XML returned by %s bugzilla: %s (%s)' % (self.description, e, url)
-#            raise BugtrackerError, s
-#        return [(id, component, title, severity, status, assignee, "%s/show_bug.cgi?id=%d" % (self.url, id))]
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+        return (id, product, title, severity, status, assignee, "%s/show_bug.cgi?id=%d" % (self.url, id), [], [])
 
 class Launchpad(IBugtracker):
-    statuses = ["Unknown", "Invalid", "Opinion", "Won't Fix", "Fix Released", "Fix Committed", "New", "Incomplete", "Confirmed", "Triaged", "In Progress"]
-    severities = ["Unknown", "Undecided", "Wishlist", "Low", "Medium", "High", "Critical"]
+    statuses = ("Unknown", "Invalid", "Opinion", "Won't Fix", "Fix Released", "Fix Committed", "New",
+                "Incomplete", "Confirmed", "Triaged", "In Progress")
+    severities = ("Unknown", "Undecided", "Wishlist", "Low", "Medium", "High", "Critical")
 
     def __init__(self, *args, **kwargs):
         IBugtracker.__init__(self, *args, **kwargs)
@@ -693,193 +614,152 @@ class Launchpad(IBugtracker):
         # support for /+text in the future in favour of launchpadlib.
         # Terence Simpson (tsimpson) 2010-04-20
 
-        try: # Attempt to use launchpadlib, python bindings for the Launchpad API
+        try:
             from launchpadlib.launchpad import Launchpad
-            cachedir = os.path.join(conf.supybot.directories.data.tmp(), 'lpcache')
-            if hasattr(Launchpad, 'login_anonymously'):
-                self.lp = Launchpad.login_anonymously("Ubuntu Bots - Bugtracker", 'production', cachedir)
-            else: #NOTE: Most people should have a launchpadlib new enough for .login_anonymously
-                self.lp = Launchpad.login("Ubuntu Bots - Bugtracker", '', '', 'production', cahedir)
+            cachedir = os.path.join(conf.supybot.directories.data.tmp(), 'launchpadlib')
+            self.lp = Launchpad.login_anonymously("Ubuntu Bots - Bugtracker", 'production', cachedir, version='devel')
         except ImportError:
-            # Ask for launchpadlib to be installed
             supylog.warning("Please install python-launchpadlib, the old interface is deprecated")
-        except Exception: # Something unexpected happened
+        except Exception:
             self.lp = None
             supylog.exception("Unknown exception while accessing the Launchpad API")
 
-    def _parse(self, task): #Depricated
+    def _parse(self, task): # Deprecated
         parser = FeedParser()
         parser.feed(task)
         return parser.close()
 
-    def get_bug(self, id): #TODO: Remove this method and rename 'get_new_bug' to 'get_bug'
-        if self.lp:
-            return self.get_bug_new(id)
-        return self.get_bug_old(id)
+    @classmethod
+    def _rank(cls, task):
+        try:
+            return float('%d.%02d' % (cls.statuses.index(task.status),
+                         cls.severities.index(task.importance)))
+        except:
+            return 0
 
     @classmethod
-    def _sort(cls, task1, task2):
-        task1_status = task1.status
-        task1_importance = task1.importance
-        task2_status = task2.status
-        task2_importance = task2.importance
+    def _rank_old(cls, task):
+        try:
+            return float('%d.%02d' % (cls.statuses.index(task['status']),
+                         cls.severities.index(task['importance'])))
+        except:
+            return 0
 
-        if task1_status not in cls.statuses:
-            supylog.error("%r is an unknown status for Launchapd, update %s.statuses" % (task1_status, getattr(cls, '__name__', 'Launchpad')))
-            if task2_status not in cls.statuses:
-                supylog.error("%r is an unknown status for Launchapd, update %s.statuses" % (task1_status, getattr(cls, '__name__', 'Launchpad')))
-                return -1
-            return 1
+    @classmethod
+    def _sort(cls, task1, task2): # Deprecated
+        try:
+            if task1.status != task2.status:
+                if cls.statuses.index(task1.status) < cls.statuses.index(task2.status):
+                    return -1
+                return 1
 
-        if task1_importance not in cls.severities:
-            supylog.error("%r is an unknown status for Launchapd, update %s.severities" % (task1_importance, getattr(cls, '__name__', 'Launchpad')))
-            if task2_importance not in cls.severities:
-                supylog.error("%r is an unknown status for Launchapd, update %s.severities" % (task1_importance, getattr(cls, '__name__', 'Launchpad')))
-                return -1
-            return 1
-
-        if task1_status != task2_status:
-            if cls.statuses.index(task1_status) < cls.statuses.index(task2_status):
-                return -1
-            return 1
-        if task1_importance != task2_importance:
-            if cls.severities.index(task1_importance) < cls.severities.index(task2_importance):
-                return -1
-            return 1
+            if task1.importance != task2.importance:
+                if cls.severities.index(task1.importance) < cls.severities.index(task2.importance):
+                    return -1
+                return 1
+        except:
+            return 0
         return 0
 
     @classmethod
-    def _old_sort(cls, task1, task2): #Depricated
-        # Status sort: 
+    def _sort_old(cls, task1, task2): # Deprecated
         try:
-            if task1['status'] not in cls.statuses and task2['status'] in cls.statuses: return -1
-            if task1['status'] in cls.statuses and task2['status'] not in cls.statuses: return 1
-            if task1['importance'] not in cls.severities and task2['importance'] in cls.severities: return -1
-            if task1['importance'] in cls.severities and task2['importance'] not in cls.severities: return 1
-            if not (task1['status'] == task2['status']):
+            if task1['status'] != task2['status']:
                 if cls.statuses.index(task1['status']) < cls.statuses.index(task2['status']):
                     return -1
                 return 1
-            if not (task1['importance'] == task2['importance']):
+
+            if task1['importance'] != task2['importance']:
                 if cls.severities.index(task1['importance']) < cls.severities.index(task2['importance']):
                     return -1
                 return 1
-        except: # Launchpad changed again?
+        except:
             return 0
         return 0
+
+    def get_bug(self, id): #TODO: Remove this method and rename 'get_bug_new' to 'get_bug'
+        if self.lp:
+            return self.get_bug_new(id)
+        return self.get_bug_old(id)
 
     def get_bug_new(self, id): #TODO: Rename this method to 'get_bug'
         try:
             bugdata = self.lp.bugs[id]
             if bugdata.private:
                 raise BugtrackerError("This bug is private")
+            duplicate = []
             dup = bugdata.duplicate_of
-            summary_prefix = '' # Used to made dups easier
             while dup:
-                summary_prefix = 'duplicate for #%d ' % id
+                duplicate.append(str(bugdata.id))
                 bugdata = dup
                 dup = bugdata.duplicate_of
 
-            affected = bugdata.users_affected_count_with_dupes
-            heat = bugdata.heat
+            extinfo = ['affected: %d' % bugdata.users_affected_count_with_dupes]
+            extinfo.append('heat: %d' % bugdata.heat)
             tasks = bugdata.bug_tasks
 
-            if tasks.total_size != 1:
-                tasks = list(tasks)
-                try:
-                    sorted(tasks, key=cmp_to_key(self._sort))
-                    taskdata = tasks[-1]
-                except ValueError:
-                    tasks = [_ for _ in tasks if _.bug_target_name.endswith('(Ubuntu)')]
-                    if tasks:
-                        if len(tasks) != 1:
-                            try:
-                                sorted(tasks, key=cmp_to_key(self._sort))
-                                taskdata = tasks[-1]
-                            except ValueError:
-                                taskdata = bugdata.bug_tasks[bugdata.bug_tasks.total_size - 1]
-                        else:
-                            taskdata = tasks[-1]
-                    else:
-                        taskdata = tasks[-1]
+            if tasks.total_size > 1:
+                taskdata = sorted(tasks, key=self._rank)[-1]
             else:
                 taskdata = tasks[0]
 
-            assignee = taskdata.assignee
-            t = taskdata.bug_target_display_name #task name
-
-            if assignee: # "Diaplay Name (Launchpad ID)"
-                assignee = "%s (%s)" % (assignee.display_name, assignee.name)
+            if taskdata.assignee:
+                assignee = taskdata.assignee.display_name
             else:
                 assignee = ''
 
         except Exception as e:
             if type(e).__name__ == 'HTTPError': # messy, but saves trying to import lazr.restfulclient.errors.HTPError
                 if e.response.status == 404:
-                    bugNo = e.content.split(None)[-1][2:-1] # extract the real bug number
+                    bugNo = e.content.split()[-1][2:-1] # extract the real bug number
                     if bugNo != str(id): # A duplicate of a private bug, at least we know it exists
-                        raise BugtrackerError('Bug #%s is a duplicate of bug #%s, but it is private (%s/bugs/%s)' % (id, bugNo, self.url, bugNo))
-                    raise BugtrackerError("Bug #%s (%s/bugs/%d) is private or doesn't exist" % (id, self.url, id)) # Could be private, could just not exist
-
-                supylog.exception("Error gathering bug data for %s bug #%d" % (self.description, id))
-                raise BugtrackerError("Could not gather data from %s for bug #%s (%s/bugs/%s). The error has been logged" % (self.description, id, self.url, id))
+                        raise BugtrackerError('Bug #%d is a duplicate of bug #%s, but it is private (%s/bugs/%s)' % (id, bugNo, self.url, bugNo))
+                    raise BugtrackerError("Bug #%d is private or does not exist (%s/bugs/%d)" % (id, self.url, id)) # Could be private, could just not exist
+                raise BugtrackerError(self.errget % (self.description, e, '%s/bugs/%d' % (self.url, id)))
             elif isinstance(e, KeyError):
                 raise BugNotFoundError
-            supylog.exception("Error gathering bug data for %s bug %d" % (self.description, id))
-            raise BugtrackerError("Could not gather data from %s for bug #%s (%s/bugs/%s). The error has been logged" % (self.description, id, self.url, id))
+            raise BugtrackerError(self.errget % (self.description, e, '%s/bugs/%d' % (self.url, id)))
 
-        extinfo = "(affected: %d, heat: %d)" % (affected, heat)
+        return (bugdata.id, taskdata.bug_target_display_name, bugdata.title, taskdata.importance, taskdata.status,
+                assignee, "%s/bugs/%d" % (self.url, bugdata.id), extinfo, duplicate)
 
-        return [(bugdata.id, t, summary_prefix + bugdata.title, taskdata.importance, taskdata.status,
-                assignee, "%s/bugs/%s" % (self.url, bugdata.id), extinfo)]
-
-    def get_bug_old(self, id): #Depricated
-        if id == 1:
-            raise BugtrackerError("https://bugs.launchpad.net/ubuntu/+bug/1 (Not reporting large bug)")
-
+    def get_bug_old(self, id, duplicate=None): # Deprecated
         try:
-            bugdata = utils.web.getUrl("%s/bugs/%d/+text" % (self.url,id))
+            bugdata = utils.web.getUrl("%s/bugs/%d/+text" % (self.url, id)).decode('utf-8')
         except Exception as e:
-            if '404' in str(e):
-                raise BugNotFoundError
-            s = 'Could not parse data returned by %s: %s (%s/bugs/%d)' % (self.description, e, self.url, id)
-            raise BugtrackerError(s)
-        summary = {}
-        # Trap private bugs
-        if "<!-- 4a. didn't try to log in last time: -->" in bugdata:
-            raise BugtrackerError("This bug is private")
+            if 'HTTP Error 404' in str(e):
+                if duplicate:
+                    raise BugtrackerError('Bug #%d is a duplicate of bug #%d, but it is private (%s/bugs/%d)' % (duplicate, id, self.url, id))
+                else:
+                    raise BugNotFoundError
+            raise BugtrackerError(self.errget % (self.description, e, '%s/bugs/%d' % (self.url, id)))
+
         try:
             # Split bug data into separate pieces (bug data, task data)
-            data     =  bugdata.split('\n\n')
-            bugdata  = data[0]
-            taskdata = data[1:]
-            parser   = FeedParser()
-            parser.feed(bugdata)
-            bugdata = parser.close()
-            taskdata = list(map(self._parse, taskdata))
-            taskdata.sort(self._old_sort)
-            taskdata = taskdata[-1]
-                
+            data    = bugdata.split('\n\nContent-Type:', 1)[0].split('\n\n')
+            bugdata = self._parse(data[0])
+            if not bugdata['duplicate-of']:
+                taskdata = list(map(self._parse, data[1:]))
+                if len(taskdata) > 1:
+                    taskdata = sorted(taskdata, key=self._rank_old)[-1]
+                else:
+                    taskdata = taskdata[0]
+                if taskdata['assignee']:
+                    assignee = re.sub(r' \([^)]*\)$', '', taskdata['assignee'])
+                else:
+                    assignee = ''
         except Exception as e:
-            s = 'Could not parse data returned by %s: %s (%s/bugs/%d)' % (self.description, e, self.url, id)
-            raise BugtrackerError(s)
+            raise BugtrackerError(self.errparse % (self.description, e, '%s/bugs/%d' % (self.url, id)))
+
         # Try and find duplicates
-        t = taskdata['task']
-        if '(' in t:
-            t = t[:t.rfind('(') -1]
-        if bugdata['duplicate-of']: # This will suck if for dup of dups..., but +text is pure suck anyway
-            bugNo = bugdata['duplicate-of']
-            try:
-                data = self.get_bug(int(bugdata['duplicate-of']))
-            except Exception as e:
-                if '404' in str(e):
-                    raise BugtrackerError('Bug #%s is a duplicate of Bug #%s, but it is private. (%s/bugs/%s)' % (id, bugNo, self.url, bugNo))
-            data = list(data[0])
-            data[2] = ('duplicate for #%d ' % id) + data[2]
-            return [tuple(data)]
-        return [(id, t, bugdata['title'], taskdata['importance'], 
-                taskdata['status'], taskdata['assignee'], "%s/bugs/%s" % (self.url, id))]
-            
+        if bugdata['duplicate-of']:
+            data = self.get_bug_old(int(bugdata['duplicate-of']), duplicate or id)
+            data[8].append(bugdata['bug'])
+            return data
+
+        return (id, taskdata['task'], bugdata['title'], taskdata['importance'], taskdata['status'],
+                assignee, "%s/bugs/%d" % (self.url, id), [], [])
+
 # <rant>
 # Debbugs sucks donkeyballs
 # * HTML pages are inconsistent
@@ -892,77 +772,242 @@ class Launchpad(IBugtracker):
 # </rant>
 class Debbugs(IBugtracker):
     def __init__(self, *args, **kwargs):
-        if not sys.version_info < (3,0):
-            # XXX python3 does not have SOAPpy, so just quit here (for now)
-            return
         IBugtracker.__init__(self, *args, **kwargs)
-        self.soap_proxy = SOAPpy.SOAPProxy("bugs.debian.org/cgi-bin/soap.cgi", "Debbugs/SOAP/Status")
-        self.soap_proxy.soapaction = "Debbugs/SOAP/Status#get_status"
+        self.soap_client = SoapClient("%s/cgi-bin/soap.cgi" % self.url, namespace="Debbugs/SOAP")
 
     def get_bug(self, id):
-        bug_url = "http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=%d" % id
+        url = "%s/cgi-bin/bugreport.cgi?bug=%d" % (self.url, id)
         try:
-            raw = self.soap_proxy.get_status(id)
+            raw = self.soap_client.get_status(bugs=id)
         except Exception as e:
-            s = 'Could not parse data returned by %s: %s' % (self.description, e)
-            raise BugtrackerError(s)
-        if not raw:
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        if not hasattr(raw, 'item'):
             raise BugNotFoundError
-        raw = raw['item']['value']
         try:
-            if len(raw['fixed_versions']):
+            raw = raw.item.value
+            if str(raw.fixed_versions):
                 status = 'Fixed'
             else:
                 status = 'Open'
-            return [(id, raw['package'], raw['subject'], raw['severity'], status, '', "%s/%s" % (self.url, id))]
+            return (id, str(raw.package), str(raw.subject), str(raw.severity), status, '', "%s/%d" % (self.url, id), [], [])
         except Exception as e:
-            s = 'Could not parse data returned by %s bugtracker: %s (%s)' % (self.description, e, bug_url)
-            raise BugtrackerError(s)
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+
+class SourceForge(IBugtracker):
+    def get_tracker(self, url):
+        try:
+            match = re.match(r'sourceforge\.net/p/[^\s/]+/(bugs|feature-requests|patches|todo)', url)
+            name  = desc = match.group(0)
+            url   = 'https://%s' % name
+#            registerBugtracker(name, url, desc, 'sourceforge')
+            return SourceForge(name, url, desc, 'sourceforge')
+        except:
+            pass
+
+    def get_bug(self, id):
+        url = "%s/%d/" % (self.url.replace('sourceforge.net', 'sourceforge.net/rest'), id)
+        try:
+            bugjson = utils.web.getUrl(url)
+            bug = json.loads(bugjson.decode('utf-8'))['ticket']
+        except Exception as e:
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        try:
+            product = severity = ''
+            if bug['labels']:
+                product = bug['labels'][0]
+            if '_priority' in bug['custom_fields']:
+                severity = 'Pri: %s' % bug['custom_fields']['_priority']
+            return (id, product, bug['summary'], severity, ': '.join(bug['status'].split('-')),
+                     bug['assigned_to'], "%s/%d/" % (self.url, id), [], [])
+        except Exception as e:
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+
+class GitHub(IBugtracker):
+    def get_tracker(self, url):
+        try:
+            match = re.match(r'github\.com/[^\s/]+/[^\s/]+/(issues|pulls?)', url)
+            name  = desc = match.group(0)
+            url   = 'https://%s' % name
+            # Pulls are inconsistent in main and single page URLs
+            name  = desc = re.sub(r'/pull$', r'/pulls', name)
+#            registerBugtracker(name, url, desc, 'github')
+            return GitHub(name, url, desc, 'github')
+        except:
+            pass
+
+    def get_bug(self, id):
+        url = "%s/%d" % (self.url.replace('github.com', 'api.github.com/repos'), id)
+        # Pulls are inconsistent in web and API URLs
+        url = url.replace('/pull/', '/pulls/')
+        try:
+            bugjson = utils.web.getUrl(url)
+            bug = json.loads(bugjson.decode('utf-8'))
+        except Exception as e:
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        try:
+            product = '/'.join(url.split('/')[-4:-2])
+            if 'merged' in bug and bug['merged']:
+                status = 'Merged'
+            else:
+                status = bug['state']
+            if bug['assignee']:
+                assignee = bug['assignee']['login']
+            else:
+                assignee = ''
+            return (id, product, bug['title'], '', status, assignee, bug['html_url'], [], [])
+        except Exception as e:
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+
+class GitLab(IBugtracker):
+    def get_tracker(self, url, id):
+        try:
+            match = re.match(r'[^\s/]+/[^\s/]+/[^\s/]+/(issues|merge_requests)', url)
+            name  = desc = match.group(0)
+            url   = 'https://%s' % name
+            bugurl = '%s/%d.json' % (url, id)
+            bugjson = utils.web.getUrl(bugurl)
+            bug   = json.loads(bugjson.decode('utf-8'))
+#            registerBugtracker(name, url, desc, 'gitlab')
+            return GitLab(name, url, desc, 'gitlab')
+        except:
+            pass
+
+    def get_bug(self, id):
+        url = "%s/%d.json" % (self.url, id)
+        try:
+            bugjson = utils.web.getUrl(url)
+            bug = json.loads(bugjson.decode('utf-8'))
+        except Exception as e:
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        try:
+            product = '/'.join(url.split('/')[-4:-2])
+            status = bug['state']
+            if 'assignees' in bug and bug['assignees']:
+                assignee = bug['assignees'][0]['name']
+            else:
+                assignee = ''
+            return (id, product, bug['title'], '', status, assignee, "%s/%d" % (self.url, id), [], [])
+        except Exception as e:
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+
+class Gitea(IBugtracker):
+    def get_tracker(self, url, id):
+        try:
+            match = re.match(r'[^\s/]+/[^\s/]+/[^\s/]+/(issues|pulls)', url)
+            name  = desc = match.group(0)
+            url   = 'https://%s' % name
+            bugurl = '%s/%d' % (re.sub(r'://[^\s/]+/', r'\g<0>api/v1/repos/', url), id)
+            bugjson = utils.web.getUrl(bugurl)
+            bug   = json.loads(bugjson.decode('utf-8'))
+#            registerBugtracker(name, url, desc, 'gitea')
+            return Gitea(name, url, desc, 'gitea')
+        except:
+            pass
+
+    def get_bug(self, id):
+        url = "%s/%d" % (re.sub(r'://[^\s/]+/', r'\g<0>api/v1/repos/', self.url), id)
+        try:
+            bugjson = utils.web.getUrl(url)
+            bug = json.loads(bugjson.decode('utf-8'))
+        except Exception as e:
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        try:
+            product = '/'.join(url.split('/')[-4:-2])
+            if 'merged' in bug and bug['merged']:
+                status = 'Merged'
+            else:
+                status = bug['state']
+            if bug['assignee']:
+                assignee = bug['assignee']['username']
+            else:
+                assignee = ''
+            # Issues have no 'html_url', but pulls do
+            return (id, product, bug['title'], '', status, assignee, "%s/%d" % (self.url, id), [], [])
+        except Exception as e:
+            raise BugtrackerError(self.errparse % (self.description, e, url))
 
 class Mantis(IBugtracker):
     def __init__(self, *args, **kwargs):
-        if not sys.version_info < (3,0):
-            # XXX python3 does not have SOAPpy, so just quit here (for now)
-            return
         IBugtracker.__init__(self, *args, **kwargs)
-        IBugtracker.__init__(self, *args, **kwargs)
-        self.soap_proxy = SOAPpy.SOAPProxy(self.url + "/api/soap/mantisconnect.php", "http://futureware.biz/mantisconnect")
-        self.soap_proxy.soapaction = "http://futureware.biz/mantisconnect#mc_issue_get"
+        self.soap_client = SoapClient("%s/api/soap/mantisconnect.php" % self.url, namespace="http://futureware.biz/mantisconnect")
+
+    def get_tracker(self, url):
+        try:
+            match = re.match(r'(?P<url>(?P<name>[^\s/]+).*)/view\.php', url)
+            name  = desc = match.group('name')
+            url   = 'https://%s' % match.group('url')
+#            registerBugtracker(name, url, desc, 'mantis')
+            return Mantis(name, url, desc, 'mantis')
+        except:
+            pass
 
     def get_bug(self, id):
-        url = self.url + "/view.php?id=%i" % id
+        url = "%s/api/rest/issues/%d" % (self.url, id)
         try:
-            raw = self.soap_proxy.mc_issue_get('', "", id)
+            bugjson = utils.web.getUrl(url)
+            bug = json.loads(bugjson.decode('utf-8'))['issues'][0]
         except Exception as e:
-            s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
-        if not raw:
+            # REST API may not be enabled yet
+            if 'HTTP Error 404' in str(e):
+                return self.get_bug_old(id)
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        try:
+            return (id, bug['project']['name'], bug['summary'], bug['severity']['name'], bug['resolution']['name'], '', url, [], [])
+        except Exception as e:
+            raise BugtrackerError(self.errparse % (self.description, e, url))
+
+    def get_bug_old(self, id): # Deprecated
+        url = "%s/view.php?id=%d" % (self.url, id)
+        try:
+            raw = self.soap_client.mc_issue_get(username='', password='', issue_id=id)
+        except Exception as e:
+            if 'Issue #%d not found' % id in str(e):
+                raise BugNotFoundError
+            # Often SOAP is not enabled
+            if '.' in self.name:
+                supylog.exception(self.errget % (self.description, e, url))
+                return
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        if not hasattr(raw, 'id'):
             raise BugNotFoundError
         try:
-            return [(id, raw['project']['name'], raw['summary'], raw['priority']['name'], raw['resolution']['name'], '', url)]
+            return (id, str(raw.project.name), str(raw.summary), str(raw.severity.name), str(raw.resolution.name), '', url, [], [])
         except Exception as e:
-            s = 'Could not parse data returned by %s bugtracker: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
+            raise BugtrackerError(self.errparse % (self.description, e, url))
 
-# For trac based trackers we get the tab-separated-values format.
+# For Trac-based trackers we get the tab-separated-values format.
 # The other option is a comma-separated-values format, but if the description
 # has commas, things get tricky.
-# This should be more robust than the screen-scraping done previously.
+# This should be more robust than the screen scraping done previously.
 class Trac(IBugtracker):
-    def get_bug(self, id): # This is still a little rough, but it works :)
-        bug_url = "%s/%d" % (self.url, id)
+    def get_tracker(self, url):
         try:
-            raw = utils.web.getUrl("%s?format=tab" % bug_url)
+            match = re.match(r'(?P<name>[^\s/]+).*/ticket', url)
+            name  = desc = match.group('name')
+            url   = 'https://%s' % match.group(0)
+#            registerBugtracker(name, url, desc, 'trac')
+            return Trac(name, url, desc, 'trac')
+        except:
+            pass
+
+    def get_bug(self, id): # This is still a little rough, but it works :)
+        url = "%s/%d" % (self.url, id)
+        try:
+            raw = utils.web.getUrl("%s?format=tab" % url).decode('utf-8')
         except Exception as e:
+            # Due to unreliable matching
+            if '.' in self.name:
+                supylog.exception(self.errget % (self.description, e, url))
+                return
             if 'HTTP Error 500' in str(e):
                 raise BugNotFoundError
-            s = 'Could not parse data returned by %s: %s' % (self.description, e, bug_url)
-            raise BugtrackerError(s)
-        raw = raw.replace("\r\n", '\n')
+            raise BugtrackerError(self.errget % (self.description, e, url))
+        raw = raw.replace('\r\n', '\n')
         (headers, rest) = raw.split('\n', 1)
         headers = headers.strip().split('\t')
         rest = rest.strip().split('\t')
-        title = status = package = severity = assignee = "Unknown"
+
+        title = status = package = severity = assignee = ""
         if "summary" in headers:
             title = rest[headers.index("summary")]
         if "status" in headers:
@@ -971,101 +1016,11 @@ class Trac(IBugtracker):
             package = rest[headers.index("component")]
         if "severity" in headers:
             severity = rest[headers.index("severity")]
-        if "owner" in headers:
-            assingee = rest[headers.index("owner")]
-        if severity == "Unknown" and "priority" in headers:
+        elif "priority" in headers:
             severity = rest[headers.index("priority")]
-
-        return [(id, package, title, severity, status, assignee, bug_url)]
-        
-class WikiForms(IBugtracker):
-    def get_bug(self, id):
-        def strip_tags(s):
-            while '<' in s and '>' in s:
-                s = str(s[:s.find('<')]) + str(s[s.find('>')+1:])
-            return s
-
-        url = "%s/%05d" % (self.url, id)
-        try:
-            bugdata = utils.web.getUrl(url)
-        except Exception as e:
-            if 'HTTP Error 404' in str(e):
-                raise BugNotFoundError
-            s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
-        for l in bugdata.split("\n"):
-            l2 = l.lower()
-            if '<dt>importance</dt>' in l2:
-                severity = 'Importance ' + strip_tags(l[l.find('<dd>')+4:])
-            if '<dt>summary</dt>' in l2:
-                title = strip_tags(l[l.find('<dd>')+4:])
-            if '<dt>status</dt>' in l2:
-                status = strip_tags(l[l.find('<dd>')+4:])
-            if '<dt>category</dt>' in l2:
-                package = strip_tags(l[l.find('<dd>')+4:])
-        return [(id, package, title, severity, status, '', "%s/%05d" % (self.url, id))]
-
-class Str(IBugtracker):
-    def get_bug(self, id):
-        def strip_tags(s):
-            while '<' in s and '>' in s:
-                s = str(s[:s.find('<')]) + str(s[s.find('>')+1:])
-            return s
-        url = "%s?L%d" % (self.url, id)
-        try:
-            bugdata = utils.web.getUrl(url)
-        except Exception as e:
-            s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
-        for l in bugdata.split("\n"):
-            l2 = l.lower()
-            if 'nowrap>priority:</th>' in l2:
-                severity = 'Priority ' + l[l.find(' - ')+3:min(l.find(','),l.find('</td>'))]
-            if '>application:</th>' in l2:
-                package = l[l.find('<td>')+4:l.find('</td>')]
-            if 'nowrap>status:</th>' in l2:
-                status = l[l.find(' - ')+3:l.find('</td>')]
-            if 'nowrap>summary:</th>' in l2:
-                title = l[l.find('<td>')+4:l.find('</td>')]
-            if 'nowrap>assigned to:</th>' in l2:
-                assignee = strip_tags(l[l.find('<td>')+4:l.find('</td>')])
-                if assignee == 'Unassigned':
-                    assignee = 'nobody'
-        return [(id, package, title, severity, status, assignee, "%s?L%d" % (self.url, id))]
-        
-
-sfre = re.compile(r"""
-                  .*?
-                  <h2>\[.*?\]\s*(?P<title>.*?)</h2>
-                  .*?
-                  assigned.*?<br>\s+(?P<assignee>\S+)
-                  .*?
-                  priority.*?(?P<priority>\d+)
-                  .*?
-                  status.*?<br>\s+(?P<status>\S+)
-                  .*?
-                  resolution.*?<br>\s+(?P<resolution>\S+)
-                  .*?
-                  """, re.VERBOSE | re.DOTALL | re.I)
-#NOTE: Until sf.net has a way to export formatted bug data, this will remain broken and unmaintained
-class Sourceforge(IBugtracker):
-    _sf_url = 'http://sf.net/support/tracker.php?aid=%d'
-    def get_bug(self, id):
-        url = self._sf_url % id
-        try:
-            bugdata = utils.web.getUrl(url)
-        except Exception as e:
-            s = 'Could not parse data returned by %s: %s (%s)' % (self.description, e, url)
-            raise BugtrackerError(s)
-        try:
-            reo = sfre.search(bugdata)
-            status = reo.group('status')
-            resolution = reo.group('resolution')
-            if not (resolution.lower() == 'none'):
-                status += ' ' + resolution
-            return [(id, None, reo.group('title'), "Pri: %s" % reo.group('priority'), status, reo.group('assignee'),self._sf_url % id)]
-        except:
-            raise BugNotFoundError
+        if "owner" in headers:
+            assignee = rest[headers.index("owner")]
+        return (id, package, title, severity, status, assignee, url, [], [])
 
 # Introspection is quite cool
 defined_bugtrackers = {}
@@ -1074,26 +1029,23 @@ for k in list(v.keys()):
     if type(v[k]) == type(IBugtracker) and issubclass(v[k], IBugtracker) and not (v[k] == IBugtracker):
         defined_bugtrackers[k.lower()] = v[k]
 
-registerBugtracker('mozilla', 'http://bugzilla.mozilla.org', 'Mozilla', 'bugzilla')
+registerBugtracker('mozilla', 'https://bugzilla.mozilla.org', 'Mozilla', 'bugzilla')
+registerBugtracker('gnome', 'https://bugzilla.gnome.org', 'Gnome', 'bugzilla')
+registerBugtracker('gnome2', 'https://bugs.gnome.org', 'Gnome', 'bugzilla')
+registerBugtracker('kde', 'https://bugs.kde.org', 'KDE', 'bugzilla')
+registerBugtracker('xfce', 'https://bugzilla.xfce.org', 'Xfce', 'bugzilla')
+registerBugtracker('lxde', 'https://sourceforge.net/p/lxde/bugs', 'LXDE', 'sourceforge')
+registerBugtracker('freedesktop', 'https://bugzilla.freedesktop.org', 'Freedesktop', 'bugzilla')
+registerBugtracker('freedesktop2', 'https://bugs.freedesktop.org', 'Freedesktop', 'bugzilla')
+registerBugtracker('openoffice', 'https://bz.apache.org/ooo', 'OpenOffice', 'bugzilla')
 registerBugtracker('ubuntu', 'https://launchpad.net', 'Ubuntu', 'launchpad')
-registerBugtracker('gnome', 'http://bugzilla.gnome.org', 'Gnome', 'bugzilla')
-registerBugtracker('gnome2', 'http://bugs.gnome.org', 'Gnome', 'bugzilla')
-registerBugtracker('kde', 'http://bugs.kde.org', 'KDE', 'bugzilla')
-registerBugtracker('ximian', 'http://bugzilla.ximian.com', 'Ximian', 'bugzilla')
-registerBugtracker('freedesktop', 'http://bugzilla.freedesktop.org', 'Freedesktop', 'bugzilla')
-registerBugtracker('freedesktop2', 'http://bugs.freedesktop.org', 'Freedesktop', 'bugzilla')
-registerBugtracker('openoffice', 'http://openoffice.org/issues', 'OpenOffice.org', 'issuezilla')
+registerBugtracker('ubottu', 'https://launchpad.net', 'Ubottu', 'launchpad')
 registerBugtracker('launchpad', 'https://launchpad.net', 'Launchpad', 'launchpad')
 registerBugtracker('lp', 'https://launchpad.net', 'Launchpad', 'launchpad')
-registerBugtracker('malone', 'https://launchpad.net', 'Launchpad', 'launchpad')
-registerBugtracker('debian', 'http://bugs.debian.org', 'Debian', 'debbugs')
-registerBugtracker('trac', 'http://trac.edgewall.org/ticket', 'Trac', 'trac')
-registerBugtracker('django', 'http://code.djangoproject.com/ticket', 'Django', 'trac')
-registerBugtracker('cups', 'http://www.cups.org/str.php', 'CUPS', 'str')
-registerBugtracker('gnewsense', 'http://bugs.gnewsense.org/Bugs', 'gNewSense', 'wikiforms')
-registerBugtracker('supybot', 'http://sourceforge.net/tracker/?group_id=58965&atid=489447', 'Supybot', 'sourceforge')
-registerBugtracker('mantis', "http://www.mantisbt.org/bugs", "Mantis", 'mantis')
-registerBugtracker('ubottu', 'https://launchpad.net', 'Ubottu', 'launchpad')
-# Don't delete this one
-registerBugtracker('sourceforge', 'http://sourceforge.net/tracker/', 'Sourceforge', 'sourceforge')
+registerBugtracker('debian', 'https://bugs.debian.org', 'Debian', 'debbugs')
+registerBugtracker('supybot', 'https://sourceforge.net/p/supybot/bugs', 'Supybot', 'sourceforge')
+registerBugtracker('irssi', 'https://github.com/irssi/irssi/issues', 'irssi/irssi', 'github')
+registerBugtracker('mantis', 'https://www.mantisbt.org/bugs', 'Mantis', 'mantis')
+registerBugtracker('trac', 'https://trac.edgewall.org/ticket', 'Trac', 'trac')
+registerBugtracker('pidgin', 'https://developer.pidgin.im/ticket', 'Pidgin', 'trac')
 Class = Bugtracker

@@ -33,25 +33,25 @@ def configure(advanced):
 
     def getRepeatdelay():
         output("How many seconds should the bot wait before repeating bug information?")
-        repeatdelay = something("Enter a number greater or equal to 0", default=Bugtracker.repeatdelay._default)
+        repeatdelay = something("Enter a number greater or equal to 0.", default=Bugtracker.repeatdelay._default)
 
         try:
             repeatdelay = int(repeatdelay)
             if repeatdelay < 0:
                 raise TypeError
         except TypeError:
-            output("%r is an invalid value, it must be an integer greater or equal to 0" % repeatdelay)
+            output("Invalid value '%s', it must be an integer greater or equal to 0." % repeatdelay)
             return getRepeatdelay()
         else:
             return repeatdelay
 
-    output("Each of the next 3 questions can be set per-channel with the '@Config channel' command")
+    output("Each of the next 3 questions can be set per-channel with the '@config channel' command.")
     bugSnarfer = yn("Enable detecting bugs numbers and URL in all channels?", default=Bugtracker.bugSnarfer._default)
     cveSnarfer = yn("Enable detecting CVE numbers and URL in all channels?", default=Bugtracker.cveSnarfer._default)
     oopsSnarfer = yn("Enable detecting Launchpad OOPS IDs in all channels?", default=Bugtracker.oopsSnarfer._default)
     if advanced:
-        replyNoBugtracker = something("What should the bot reply with when a a user requests information from an unknown bug tracker?", default=Bugtracker.replyNoBugtracker._default)
-        snarfTarget = something("What should be the default bug tracker used when one isn't specified?", default=Bugtracker.snarfTarget._default)
+        replyNoBugtracker = something("What should the bot reply with when a user requests information from an unknown bug tracker?", default=Bugtracker.replyNoBugtracker._default)
+        snarfTarget = something("What should be the default bug tracker used when none is specified?", default=Bugtracker.snarfTarget._default)
         replyWhenNotFound = yn("Should the bot report when a bug is not found?", default=Bugtracker.replyWhenNotFound._default)
         repeatdelay = getRepeatdelay()
     else:
@@ -77,7 +77,7 @@ Bugtracker = conf.registerPlugin('Bugtracker')
 
 conf.registerChannelValue(Bugtracker, 'bugSnarfer',
     registry.Boolean(False, """Determines whether the bug snarfer will be
-    enabled, such that any Bugtracker URLs and bug ### seen in the channel
+    enabled, such that any bugtracker URLs and bug ### seen in the channel
     will have their information reported into the channel."""))
 
 conf.registerChannelValue(Bugtracker, 'cveSnarfer',
@@ -90,11 +90,8 @@ conf.registerChannelValue(Bugtracker, 'oopsSnarfer',
     enabled, such that any OOPS ### seen in the channel
     will have their information reported into the channel."""))
 
-#conf.registerChannelValue(Bugtracker, 'bugReporter',
-#    registry.String('', """Report new bugs (experimental)"""))
-
 conf.registerChannelValue(Bugtracker, 'replyNoBugtracker',
-    registry.String('I don\'t have a bugtracker %s.', """Determines the phrase
+    registry.String("I have no bugtracker '%s'", """Determines the phrase
     to use when notifying the user that there is no information about that
     bugtracker site."""))
 
@@ -116,20 +113,4 @@ conf.registerChannelValue(Bugtracker, 'showassignee',
     registry.Boolean(False, """Whether to show the assignee in bug reports"""))
 
 conf.registerChannelValue(Bugtracker, 'extended',
-    registry.Boolean(False, "Show optional extneded bug information, specific to trackers"))
-    
-#conf.registerGlobalValue(Bugtracker, 'reportercache',
-#    registry.String('', """Name of the basedir for the bugreporter cache""", private=True))
-
-#conf.registerGlobalValue(Bugtracker, 'imap_server',
-#    registry.String('', """IMAP server for bugmail account""",private=True))
-
-#conf.registerGlobalValue(Bugtracker, 'imap_user',
-#    registry.String('', """IMAP user for bugmail account""", private=True))
-
-#conf.registerGlobalValue(Bugtracker, 'imap_password',
-#    registry.String('', """IMAP password for bugmail account""", private=True))
-
-#conf.registerGlobalValue(Bugtracker, 'imap_ssl',
-#    registry.Boolean(False, """Use SSL for imap connections""", private=True))
-
+    registry.Boolean(False, """Whether to show extended bug information, specific to trackers"""))
